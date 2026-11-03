@@ -1,0 +1,110 @@
+{
+  "caption_srt_path": null,
+  "caption_vtt_path": null,
+  "captions": [],
+  "expect_audio": true,
+  "expected_duration": {
+    "rate": 90000,
+    "value": 180000
+  },
+  "expected_fps": "30/1",
+  "height": 240,
+  "output_path": "renders/r1/output.mp4",
+  "tool_calls": [
+    {
+      "args": {
+        "src": "media/source.mp4"
+      },
+      "description": "确认源素材事实",
+      "seq": 0,
+      "tool": "probe"
+    },
+    {
+      "args": {
+        "audio_bitrate": "192k",
+        "audio_codec": "aac",
+        "crf": 18,
+        "dst": "renders/r1/seg_000.mp4",
+        "end": {
+          "rate": 90000,
+          "value": 135000
+        },
+        "fps_mode": "cfr",
+        "mode": "reencode",
+        "preset": "veryfast",
+        "src": "media/source.mp4",
+        "start": {
+          "rate": 90000,
+          "value": 45000
+        },
+        "video_codec": "libx264",
+        "video_track_timescale": 90000
+      },
+      "description": "A",
+      "seq": 1,
+      "tool": "cut"
+    },
+    {
+      "args": {
+        "audio_bitrate": "192k",
+        "audio_codec": "aac",
+        "crf": 18,
+        "dst": "renders/r1/seg_001.mp4",
+        "end": {
+          "rate": 90000,
+          "value": 360000
+        },
+        "fps_mode": "cfr",
+        "mode": "reencode",
+        "preset": "veryfast",
+        "src": "media/source.mp4",
+        "start": {
+          "rate": 90000,
+          "value": 270000
+        },
+        "video_codec": "libx264",
+        "video_track_timescale": 90000
+      },
+      "description": "B",
+      "seq": 2,
+      "tool": "cut"
+    },
+    {
+      "args": {
+        "dst": "renders/r1/output.mp4",
+        "inputs": [
+          "renders/r1/seg_000.mp4",
+          "renders/r1/seg_001.mp4"
+        ],
+        "list_path": "renders/r1/concat.txt"
+      },
+      "description": "按 IR 顺序拼接片段",
+      "seq": 3,
+      "tool": "concat"
+    },
+    {
+      "args": {
+        "expect_audio": true,
+        "expected_audio_codec": "aac",
+        "expected_duration": {
+          "rate": 90000,
+          "value": 180000
+        },
+        "expected_fps": "30/1",
+        "expected_frame_count": 60,
+        "expected_height": 240,
+        "expected_pix_fmt": "yuv420p",
+        "expected_video_codec": "h264",
+        "expected_width": 320,
+        "max_av_sync_seconds": 0.5,
+        "src": "renders/r1/output.mp4",
+        "tolerance_frames": 2
+      },
+      "description": "ffprobe 断言成片事实",
+      "seq": 4,
+      "tool": "verify"
+    }
+  ],
+  "warnings": [],
+  "width": 320
+}

@@ -1,0 +1,71 @@
+{
+  "schema": "editir/v1",
+  "project_id": "p_test",
+  "revision": 1,
+  "media_facts": {
+    "src": "media/source.mp4",
+    "duration": {
+      "value": 900000,
+      "rate": 90000
+    },
+    "fps": "30/1",
+    "video": {
+      "codec_type": "video",
+      "width": 320,
+      "height": 240,
+      "avg_frame_rate": "30/1",
+      "r_frame_rate": "30/1"
+    },
+    "audio": {
+      "codec_type": "audio",
+      "channels": 2,
+      "sample_rate": 48000
+    }
+  },
+  "sequence": [
+    {
+      "op": "trim",
+      "src": "media/source.mp4",
+      "range": {
+        "start": {
+          "value": 45000,
+          "rate": 90000
+        },
+        "end": {
+          "value": 135000,
+          "rate": 90000
+        }
+      },
+      "tag": "A",
+      "confidence": null
+    },
+    {
+      "op": "trim",
+      "src": "media/source.mp4",
+      "range": {
+        "start": {
+          "value": 270000,
+          "rate": 90000
+        },
+        "end": {
+          "value": 360000,
+          "rate": 90000
+        }
+      },
+      "tag": "B",
+      "confidence": null
+    }
+  ],
+  "effects": [],
+  "audio": {
+    "loudness": null,
+    "remove_filler": false,
+    "bgm": null
+  },
+  "export": {
+    "preset": "mp4_h264",
+    "burn_captions": false,
+    "cut_mode": "reencode",
+    "fps": null
+  }
+}

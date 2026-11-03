@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smartcut"
+version = "0.1.0"
+description = "AI-driven non-linear video editing backend (P0 vertical slice)"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+license = { text = "MIT" }
+authors = [{ name = "VideoEditAgent" }]
+dependencies = [
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "sqlalchemy>=2.0",
+    "structlog>=24.1",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+server = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+]
+desktop = [
+    # Essentials + Addons：QtWidgets/QtMultimedia，不拉 WebEngine/Pdf
+    "PySide6-Essentials>=6.7",
+    "PySide6-Addons>=6.7",
+    "keyring>=25",
+]
+transcribe = ["faster-whisper>=1.0", "numpy>=1.26"]
+vision = [
+    # OpenCV 5 移除了内置 Haar cascade，锁定 4.x 以保留人脸检测数据；
+    # scenedetect 依赖 opencv-python（非 headless），统一用同一发行包。
+    "opencv-python>=4.10,<5",
+    "scenedetect>=0.6.4,<0.8",
+    "pillow>=10",
+    "numpy>=1.26",
+]
+exchange = ["opentimelineio>=0.17"]
+# 人声分离伴生 worker；GPU 用户需另行按 CUDA 版本安装 torch。
+separation = ["demucs==4.1.0"]
+packaging = ["pyinstaller>=6.10"]
+dev = [
+    "pytest>=8.2",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+smartcut-schema = "smartcut.contracts.generate:main"
+
+[project.gui-scripts]
+smartcut-desktop = "smartcut.desktop.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"smartcut.policies" = ["*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# samples/ 真实素材测试较慢，默认不进入快速回归；显式运行 -m samples。
+addopts = "-q -m 'not samples'"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "live: 需要真实外部 API（DeepSeek）的联调测试",
+    "samples: 使用 samples/ 真实素材的集成测试（较慢）",
+]

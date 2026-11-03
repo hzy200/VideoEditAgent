@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "tools": [
+    "probe",
+    "cut",
+    "concat",
+    "compose",
+    "verify",
+    "extract_audio",
+    "proxy",
+    "extract_frames",
+    "fit",
+    "subtitles",
+    "loudnorm",
+    "postprocess",
+    "mix_audio",
+    "transcode",
+    "loudnorm_measure"
+  ]
+}

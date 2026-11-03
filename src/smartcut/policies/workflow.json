@@ -1,0 +1,84 @@
+{
+  "version": 2,
+  "phases": {
+    "outline": {
+      "stop_after": "chapters",
+      "required": ["analyze", "chapters"],
+      "forbidden": ["candidates", "plan", "critic", "replan", "compile", "render", "verify"],
+      "rationale": "规则大纲：分析/感知/转写 → 章节，等待人工确认",
+      "tasks": [
+        {"id": "analyze", "agent": "analyze", "description": "分析素材事实与风险"},
+        {"id": "transcribe", "agent": "transcribe", "when": "audio", "description": "转写音频（与分析并行）"},
+        {"id": "frames", "agent": "frames", "when": "video", "depends_on": ["analyze"], "description": "1fps 抽帧"},
+        {"id": "scenes", "agent": "scenes", "when": "video", "depends_on": ["frames"], "description": "镜头切分"},
+        {"id": "quality", "agent": "quality", "when": "video", "depends_on": ["frames", "scenes"], "description": "帧质量分析"},
+        {"id": "faces", "agent": "faces", "when": "video", "depends_on": ["frames", "scenes"], "description": "人脸检测"},
+        {"id": "contactsheet", "agent": "contactsheet", "when": "video", "depends_on": ["frames"], "description": "contact sheet"},
+        {"id": "chapters", "agent": "chapters", "when": "video", "optional_depends_on": ["frames", "scenes", "quality", "faces", "transcribe"], "description": "生成章节计划"}
+      ]
+    },
+    "fast_outline": {
+      "stop_after": "chapters",
+      "required": ["analyze", "frames", "scenes", "contactsheet", "chapters"],
+      "forbidden": ["quality", "faces", "transcribe", "candidates", "plan", "audio", "critic", "qa", "replan", "compile", "render", "verify"],
+      "rationale": "快速大纲：分析/抽帧/镜头/contact sheet → 章节，等待人工确认",
+      "tasks": [
+        {"id": "analyze", "agent": "analyze", "description": "分析素材事实与风险"},
+        {"id": "frames", "agent": "frames", "when": "video", "depends_on": ["analyze"], "description": "1fps 抽帧"},
+        {"id": "scenes", "agent": "scenes", "when": "video", "depends_on": ["frames"], "description": "镜头切分"},
+        {"id": "contactsheet", "agent": "contactsheet", "when": "video", "depends_on": ["frames"], "description": "contact sheet"},
+        {"id": "chapters", "agent": "chapters", "when": "video", "optional_depends_on": ["frames", "scenes"], "description": "生成章节计划"}
+      ]
+    },
+    "plan": {
+      "stop_after": null,
+      "required": ["analyze", "plan"],
+      "forbidden": [],
+      "rationale": "规则规划：分析/抽帧/感知/章节/候选/转写 → 规划 → Audio → Critic → QA → 编译 → 渲染 → 校验",
+      "tasks": [
+        {"id": "analyze", "agent": "analyze", "description": "分析素材事实与风险"},
+        {"id": "transcribe", "agent": "transcribe", "when": "audio", "description": "转写音频（与分析并行）"},
+        {"id": "frames", "agent": "frames", "when": "video", "depends_on": ["analyze"], "description": "1fps 抽帧"},
+        {"id": "scenes", "agent": "scenes", "when": "video", "depends_on": ["frames"], "description": "镜头切分"},
+        {"id": "quality", "agent": "quality", "when": "video", "depends_on": ["frames", "scenes"], "description": "帧质量分析"},
+        {"id": "faces", "agent": "faces", "when": "video", "depends_on": ["frames", "scenes"], "description": "人脸检测"},
+        {"id": "contactsheet", "agent": "contactsheet", "when": "video", "depends_on": ["frames"], "description": "contact sheet"},
+        {"id": "chapters", "agent": "chapters", "when": "video", "optional_depends_on": ["frames", "scenes", "quality", "faces", "transcribe"], "description": "生成章节计划"},
+        {"id": "candidates", "agent": "candidates", "when": "video", "optional_depends_on": ["frames", "scenes", "quality", "faces", "chapters", "transcribe"], "description": "生成候选片段与检索索引"},
+        {"id": "plan", "agent": "plan", "when": "plan", "optional_depends_on": ["analyze", "frames", "scenes", "quality", "faces", "contactsheet", "chapters", "candidates", "transcribe"], "allow_failed_deps": true, "description": "生成 EditIR revision"},
+        {"id": "audio", "agent": "audio", "when": "plan", "depends_on": ["plan"], "description": "去口癖并提交修正版本"},
+        {"id": "critic", "agent": "critic", "when": "plan", "depends_on": ["audio"], "description": "按质量/镜头结构局部修正规划"},
+        {"id": "qa", "agent": "qa", "when": "plan", "depends_on": ["critic"], "description": "语义/结构审片"},
+        {"id": "replan", "agent": "replan", "when": "plan", "depends_on": ["qa"], "description": "按 QA 问题重规划（失败保留原 revision）"},
+        {"id": "compile", "agent": "compile", "when": "render", "depends_on": ["replan"], "description": "编译为 ToolCall[]"},
+        {"id": "render", "agent": "render", "when": "render", "depends_on": ["compile"], "description": "执行渲染"},
+        {"id": "verify", "agent": "verify", "when": "render", "depends_on": ["render"], "description": "独立校验成片"}
+      ]
+    },
+    "audio_first": {
+      "stop_after": null,
+      "required": ["analyze", "transcribe", "frames"],
+      "forbidden": [],
+      "rationale": "音频优先：转写/边界 → 抽帧/感知/章节/候选 → 规划 → 渲染 → 校验",
+      "tasks": [
+        {"id": "analyze", "agent": "analyze", "description": "分析素材事实与风险"},
+        {"id": "transcribe", "agent": "transcribe", "when": "audio", "depends_on": ["analyze"], "description": "音频优先：先转写/边界分析"},
+        {"id": "frames", "agent": "frames", "when": "video", "optional_depends_on": ["analyze", "transcribe"], "description": "1fps 抽帧"},
+        {"id": "scenes", "agent": "scenes", "when": "video", "depends_on": ["frames"], "description": "镜头切分"},
+        {"id": "quality", "agent": "quality", "when": "video", "depends_on": ["frames", "scenes"], "description": "帧质量分析"},
+        {"id": "faces", "agent": "faces", "when": "video", "depends_on": ["frames", "scenes"], "description": "人脸检测"},
+        {"id": "contactsheet", "agent": "contactsheet", "when": "video", "depends_on": ["frames"], "description": "contact sheet"},
+        {"id": "chapters", "agent": "chapters", "when": "video", "optional_depends_on": ["frames", "scenes", "quality", "faces", "transcribe"], "description": "生成章节计划"},
+        {"id": "candidates", "agent": "candidates", "when": "video", "optional_depends_on": ["frames", "scenes", "quality", "faces", "chapters", "transcribe"], "description": "生成候选片段与检索索引"},
+        {"id": "plan", "agent": "plan", "when": "plan", "optional_depends_on": ["analyze", "frames", "scenes", "quality", "faces", "contactsheet", "chapters", "candidates", "transcribe"], "allow_failed_deps": true, "description": "生成 EditIR revision"},
+        {"id": "audio", "agent": "audio", "when": "plan", "depends_on": ["plan"], "description": "去口癖并提交修正版本"},
+        {"id": "critic", "agent": "critic", "when": "plan", "depends_on": ["audio"], "description": "按质量/镜头结构局部修正规划"},
+        {"id": "qa", "agent": "qa", "when": "plan", "depends_on": ["critic"], "description": "语义/结构审片"},
+        {"id": "replan", "agent": "replan", "when": "plan", "depends_on": ["qa"], "description": "按 QA 问题重规划（失败保留原 revision）"},
+        {"id": "compile", "agent": "compile", "when": "render", "depends_on": ["replan"], "description": "编译为 ToolCall[]"},
+        {"id": "render", "agent": "render", "when": "render", "depends_on": ["compile"], "description": "执行渲染"},
+        {"id": "verify", "agent": "verify", "when": "render", "depends_on": ["render"], "description": "独立校验成片"}
+      ]
+    }
+  }
+}

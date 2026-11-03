@@ -1,0 +1,85 @@
+# SmartCut — 版本库忽略规则
+# 原则：只提交源码、契约配置、文档、脚本与打包配置；
+# 所有可下载/可生成/运行期产物与本机私有数据一律不入库。
+
+# ── 密钥与本机配置 ──────────────────────────────────────────────
+# .env 可能含 DEEPSEEK_API_KEY / VISION_API_KEY，绝不入库。
+.env
+.env.*
+!.env.example
+# DeepSeek Key 存 Windows Credential Manager，不落盘明文
+*credentials*.json
+*secret*.json
+
+# ── Python 生成物 ───────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+env/
+
+# ── 打包与构建产物（可重建）─────────────────────────────────────
+build/
+dist/
+*.exe
+*.dll
+*.pyd
+*.so
+*.dylib
+# PyInstaller 运行期产物；packaging/*.spec 是源码配置，不在忽略范围内
+*.toc
+*.pyz
+
+# ── 外部二进制与模型（由 scripts/prepare_vendor.py 下载生成）────
+# ffmpeg / ffprobe、faster-whisper 权重、Demucs 权重，合计数百 MB
+vendor/
+# Demucs 伴生 worker 的模型目录（由 scripts/prepare_demucs_models.py 生成）
+models/
+
+# ── 运行期工作区 / 日志 / 临时数据 ──────────────────────────────
+workspace/
+tmp/
+logs/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+# 测试报告与结果快照
+junit*.xml
+result.json
+
+# ── 本地测试素材（体积大，属个人资料）───────────────────────────
+# tests/golden/*.json 是小体积 fixture，必须保留，故只忽略 samples/
+samples/
+
+# ── 编辑器 / IDE / 本机工具状态 ─────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# WorkBuddy 本地会话与记忆数据（项目相关但属本机，不入库；请勿删除该目录）
+.workbuddy/
+
+# ── 其他常见产物 ───────────────────────────────────────────────
+*.bak
+*.orig
+*.rej

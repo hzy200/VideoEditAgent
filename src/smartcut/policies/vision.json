@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "prompt_version": "v1",
+  "max_images": 7,
+  "image_max_edge": 1024,
+  "image_max_bytes": 4194304,
+  "total_max_bytes": 12582912,
+  "max_keyframes_per_chapter": 2,
+  "text_first": true,
+  "text_min_chars": 40,
+  "chapter_tiles": true,
+  "second_pass_cautions": 2,
+  "mime_types": ["image/jpeg", "image/png"]
+}

@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "agents": {
+    "analyze": {
+      "description": "读取 ffprobe 事实，标记 VFR/rotation/无音频等风险"
+    },
+    "frames": {
+      "description": "1fps 抽帧，供视觉感知使用"
+    },
+    "scenes": {
+      "description": "PySceneDetect/OpenCV 镜头切分"
+    },
+    "quality": {
+      "description": "OpenCV 黑帧/静帧/糊帧/重复帧"
+    },
+    "faces": {
+      "description": "OpenCV 人脸检测，为 9:16 提供锚点"
+    },
+    "contactsheet": {
+      "description": "Pillow 拼接触表"
+    },
+    "chapters": {
+      "description": "按镜头/转写/时长生成 ChapterPlan"
+    },
+    "candidates": {
+      "description": "融合转写/镜头/质量/人脸生成候选片段并建立 FTS5 索引"
+    },
+    "transcribe": {
+      "description": "抽取音频并生成词级转写（缺少 faster-whisper 时降级）"
+    },
+    "plan": {
+      "description": "调用 DeepSeek 或提交手工 IR，生成 EditIR revision"
+    },
+    "audio": {
+      "description": "基于词级转写去除口癖并提交修正版本"
+    },
+    "critic": {
+      "description": "按质量标记与镜头结构局部修正规划并提交新 revision"
+    },
+    "qa": {
+      "description": "对 EditIR 做语义/结构审片，输出问题与置信度"
+    },
+    "replan": {
+      "description": "按 QA 问题重规划并提交新 revision（失败保留原规划）"
+    },
+    "compile": {
+      "description": "把 EditIR 编译为受控 ToolCall[]（dry-run）"
+    },
+    "render": {
+      "description": "执行 ffmpeg 工具链并产出成片"
+    },
+    "verify": {
+      "description": "对成片做独立 ffprobe 校验"
+    }
+  }
+}

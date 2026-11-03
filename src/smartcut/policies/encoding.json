@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "codecs": {
+    "libx264": {"preset": "veryfast", "quality": 18},
+    "h264_nvenc": {"preset": "p4", "quality": 20},
+    "h264_qsv": {"preset": "veryfast", "quality": 20},
+    "h264_amf": {"preset": "balanced", "quality": 20}
+  },
+  "priority_default": ["h264_nvenc", "h264_qsv", "h264_amf", "libx264"],
+  "probe_args": ["-hide_banner", "-encoders"],
+  "error_keywords": [
+    "nvenc",
+    "qsv",
+    "amf",
+    "encoder",
+    "no capable devices",
+    "cannot load",
+    "initialization",
+    "openencodesession"
+  ]
+}
