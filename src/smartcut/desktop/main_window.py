@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -49,11 +50,13 @@ from smartcut.desktop.widgets.audio_panel import AudioPanel
 from smartcut.desktop.widgets.candidate_panel import CandidatePanel
 from smartcut.desktop.widgets.diagnostics_panel import DiagnosticsPanel
 from smartcut.desktop.widgets.effects_panel import EffectsPanel
+from smartcut.desktop.widgets.evidence_panel import EvidencePanel
 from smartcut.desktop.widgets.export_dialog import ExportDialog
 from smartcut.desktop.widgets.inspector_panel import InspectorPanel
 from smartcut.desktop.widgets.metrics_panel import MetricsPanel
 from smartcut.desktop.widgets.outline_panel import OutlinePanel
 from smartcut.desktop.widgets.perception_panel import PerceptionPanel
+from smartcut.desktop.widgets.preference_panel import PreferencePanel
 from smartcut.desktop.widgets.preview_panel import PreviewPanel
 from smartcut.desktop.widgets.project_panel import ProjectPanel
 from smartcut.desktop.widgets.queue_panel import QueuePanel
@@ -184,23 +187,48 @@ class MainWindow(QMainWindow):
         self.outline_panel = OutlinePanel()
         self.perception_panel = PerceptionPanel()
         self.candidate_panel = CandidatePanel()
+        self.evidence_panel = EvidencePanel()
         self.metrics_panel = MetricsPanel()
         self.runs_panel = RunsPanel()
         self.queue_panel = QueuePanel()
         self.diagnostics_panel = DiagnosticsPanel()
-        self.tabs.addTab(self.ai_panel, "智能剪辑")
-        self.tabs.addTab(self.inspector_panel, "版本与片段")
-        self.tabs.addTab(self.subtitle_panel, "字幕")
-        self.tabs.addTab(self.audio_panel, "音频")
-        self.tabs.addTab(self.effects_panel, "特效")
-        self.tabs.addTab(self.timing_panel, "转场/变速/水印")
-        self.tabs.addTab(self.outline_panel, "大纲确认")
-        self.tabs.addTab(self.perception_panel, "感知")
-        self.tabs.addTab(self.candidate_panel, "候选片段")
-        self.tabs.addTab(self.metrics_panel, "运行指标")
-        self.tabs.addTab(self.runs_panel, "运行记录")
-        self.tabs.addTab(self.queue_panel, "任务队列")
-        self.tabs.addTab(self.diagnostics_panel, "诊断")
+        self.preference_panel = PreferencePanel()
+        self._panel_workspaces: dict[int, tuple[QTabWidget, int]] = {}
+        self._add_workspace(
+            "剪辑",
+            [
+                (self.ai_panel, "智能剪辑"),
+                (self.inspector_panel, "版本与片段"),
+                (self.preference_panel, "我的偏好"),
+            ],
+        )
+        self._add_workspace(
+            "素材与感知",
+            [
+                (self.perception_panel, "感知"),
+                (self.evidence_panel, "视觉证据"),
+                (self.candidate_panel, "候选片段"),
+                (self.outline_panel, "大纲确认"),
+            ],
+        )
+        self._add_workspace(
+            "包装",
+            [
+                (self.subtitle_panel, "字幕"),
+                (self.audio_panel, "音频"),
+                (self.effects_panel, "特效"),
+                (self.timing_panel, "转场/变速/水印"),
+            ],
+        )
+        self._add_workspace(
+            "运行与诊断",
+            [
+                (self.metrics_panel, "运行指标"),
+                (self.runs_panel, "运行记录"),
+                (self.queue_panel, "任务队列"),
+                (self.diagnostics_panel, "诊断"),
+            ],
+        )
         splitter.addWidget(self.tabs)
 
         splitter.setSizes([300, 760, 380])
@@ -385,6 +413,9 @@ class MainWindow(QMainWindow):
         self.timeline_panel.seek_requested.connect(self.preview_panel.seek)
         self.timeline_panel.segment_selected.connect(self._on_segment_selected)
         self.timeline_panel.selection_cleared.connect(self.preview_panel.clear_loop)
+        self.timeline_panel.selection_cleared.connect(
+            self.inspector_panel.clear_segment
+        )
         self.timeline_panel.modified.connect(self._on_timeline_modified)
         self.perception_panel.keyframe_selected.connect(self.preview_panel.seek)
         self.preview_panel.position_changed.connect(self.timeline_panel.set_position)
@@ -427,8 +458,45 @@ class MainWindow(QMainWindow):
         self.controller.overlay_assets_changed.connect(
             self._on_overlay_assets_changed
         )
+        self.controller.preference_changed.connect(
+            self.preference_panel.set_preference
+        )
+        self.controller.evidence_changed.connect(self._on_evidence_changed)
+        self.evidence_panel.refresh_requested.connect(self.controller.build_evidence)
+        self.evidence_panel.seek_requested.connect(self._on_evidence_seek)
+        self.preference_panel.scope_changed.connect(self._on_preference_scope)
+        self.preference_panel.set_scope(self.config.preference_scope)
         self.controller.operation_done.connect(self._on_operation_done)
         self.controller.error.connect(self._on_error)
+
+    def _add_workspace(
+        self,
+        title: str,
+        panels: list[tuple[QWidget, str]],
+    ) -> None:
+        inner = QTabWidget()
+        for panel, label in panels:
+            inner.addTab(panel, label)
+        outer_index = self.tabs.addTab(inner, title)
+        for panel, _label in panels:
+            self._panel_workspaces[id(panel)] = (inner, outer_index)
+
+    def _show_panel(self, panel: QWidget) -> None:
+        entry = self._panel_workspaces.get(id(panel))
+        if entry is None:
+            return
+        inner, outer_index = entry
+        self.tabs.setCurrentIndex(outer_index)
+        inner.setCurrentWidget(panel)
+
+    def _on_preference_scope(self, scope: str) -> None:
+        value = "project" if scope == "project" else "source"
+        self.config.preference_scope = value
+        self.store.save(self.config)
+        self.controller.set_preference_scope(value)
+        self._set_status(
+            "偏好作用域：跨素材复用" if value == "project" else "偏好作用域：仅当前素材"
+        )
 
     # ── 窗口状态 ──────────────────────────────────────────────────────
     def _restore_window_state(self) -> None:
@@ -718,8 +786,11 @@ class MainWindow(QMainWindow):
             self.ai_panel.clear()
             self.outline_panel.clear()
             self.candidate_panel.clear()
+            self.evidence_panel.clear()
+            self.timeline_panel.set_evidence(None)
             self.metrics_panel.clear()
             self.subtitle_panel.set_cues([])
+            self.preference_panel.set_preference(None)
             self.audio_panel.set_audio(None)
             self.effects_panel.clear()
             self._sync_effect_scope()
@@ -745,6 +816,9 @@ class MainWindow(QMainWindow):
         self._overlay_assets = list(project.get("overlay_assets") or [])
         self.timing_panel.set_overlay_assets(self._overlay_assets)
         workspace_dir = project.get("workspace_dir")
+        self.evidence_panel.set_workspace_root(
+            Path(workspace_dir) if workspace_dir else None
+        )
         self.candidate_panel.set_workspace_root(
             Path(workspace_dir) if workspace_dir else None
         )
@@ -898,6 +972,9 @@ class MainWindow(QMainWindow):
         payload = dict(self.current_ir)
         payload["revision"] = 0
         payload["sequence"] = sequence
+        export = dict(payload.get("export") or {})
+        export["preset"] = self.config.export_preset or "mp4_h264"
+        payload["export"] = export
         payload["effects"] = self.effects_panel.effects()
         timing_errors = self.timing_panel.errors()
         if timing_errors:
@@ -949,6 +1026,36 @@ class MainWindow(QMainWindow):
     def _build_draft_ir(self) -> EditIR:
         return EditIR.model_validate(self._draft_payload())
 
+    def _removed_segments(self, draft: EditIR) -> list[dict]:
+        """找出用户删除（而非拆分/裁剪）的旧片段，用于排除被拒标签。"""
+        base_ops = (self.current_ir or {}).get("sequence") or []
+        kept = [
+            (op.range.start.to_float(), op.range.end.to_float())
+            for op in draft.sequence
+        ]
+        removed: list[dict] = []
+        for op in base_ops:
+            time_range = op.get("range") or {}
+            start = seconds_or_none(time_range.get("start"))
+            end = seconds_or_none(time_range.get("end"))
+            if start is None or end is None or end <= start:
+                continue
+            overlap = sum(
+                max(0.0, min(end, right) - max(start, left))
+                for left, right in kept
+            )
+            if overlap / (end - start) >= 0.5:
+                continue
+            removed.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "duration": end - start,
+                    "tag": op.get("tag"),
+                }
+            )
+        return removed
+
     def _on_save_revision(self) -> None:
         if self.current_ir is None:
             QMessageBox.information(self, "SmartCut", "当前没有可编辑的 EditIR。")
@@ -959,6 +1066,9 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "无法保存版本", str(exc))
             return
 
+        rejected = self._removed_segments(ir)
+        if rejected:
+            self.controller.record_segment_reject(rejected)
         self.controller.submit_revision(ir)
         self._set_status("正在保存新版本…")
 
@@ -1083,9 +1193,7 @@ class MainWindow(QMainWindow):
         workspace = Path(self.current_project["workspace_dir"])
         self.outline_panel.set_outline(outline, workspace)
         if outline.get("status") == "awaiting_approval":
-            index = self.tabs.indexOf(self.outline_panel)
-            if index >= 0:
-                self.tabs.setCurrentIndex(index)
+            self._show_panel(self.outline_panel)
             self._set_status("大纲已生成，请确认章节后继续")
 
     def _on_outline_refresh(self) -> None:
@@ -1179,7 +1287,35 @@ class MainWindow(QMainWindow):
                 self._showing_output = True
                 self.preview_panel.load_media(path, "成片预览")
 
+    def _on_evidence_changed(self, payload: dict) -> None:
+        if self.current_project is None:
+            return
+        if payload.get("project_id") not in {
+            None,
+            self.current_project.get("id"),
+        }:
+            return
+        workspace = self.current_project.get("workspace_dir")
+        self.evidence_panel.set_workspace_root(
+            Path(workspace) if workspace else None
+        )
+        self.evidence_panel.set_evidence(payload)
+        self.timeline_panel.set_evidence(payload)
+        if payload.get("available"):
+            self._set_status(
+                f"证据已生成：{payload.get('kind')} · "
+                f"{len((payload.get('evidence') or {}).get('tile_map', {}).get('tiles') or [])} 个 tile"
+            )
+        else:
+            self._set_status(f"证据不可用：{payload.get('warning') or '未知原因'}")
+
+    def _on_evidence_seek(self, seconds: float) -> None:
+        self.preview_panel.seek(seconds)
+        self.timeline_panel.set_position(seconds)
+        self._set_status(f"证据定位：{seconds:.3f}s")
+
     def _on_segment_selected(self, _index: int, segment: dict) -> None:
+        self.inspector_panel.show_segment(segment)
         try:
             start = float(segment.get("start"))
             end = float(segment.get("end"))
@@ -1225,7 +1361,7 @@ class MainWindow(QMainWindow):
         if output_duration > start + 0.2:
             end = min(end, output_duration)
         self.subtitle_panel.add_cue(start, end)
-        self.tabs.setCurrentWidget(self.subtitle_panel)
+        self._show_panel(self.subtitle_panel)
 
     def _on_subtitle_reload(self) -> None:
         if self.current_ir is None:
@@ -1553,7 +1689,13 @@ class MainWindow(QMainWindow):
         elif op == "plan" and isinstance(result, dict):
             revision = result.get("revision")
             if revision is not None:
-                self._set_status(f"规划完成，生成 revision {revision}")
+                source = str(result.get("source") or "")
+                label = {
+                    "llm": "AI 规划",
+                    "rule": "规则规划（离线，未使用 AI）",
+                }.get(source)
+                suffix = f"（{label}）" if label else ""
+                self._set_status(f"规划完成{suffix}，生成 revision {revision}")
         elif op == "revision" and isinstance(result, dict):
             revision = result.get("revision")
             if revision is not None:
@@ -1695,6 +1837,7 @@ class MainWindow(QMainWindow):
         config.last_project_id = self.config.last_project_id
         config.preview_volume = self.config.preview_volume
         config.preview_muted = self.config.preview_muted
+        config.preference_scope = self.config.preference_scope
         self.store.save(config)
 
         if clear_key:
@@ -1742,6 +1885,8 @@ class MainWindow(QMainWindow):
         self.settings.caption_font_size = config.caption_font_size
         self.settings.caption_color = config.caption_color
         self.settings.caption_position = config.caption_position
+        self.settings.preference_scope = config.preference_scope
+        self.preference_panel.set_scope(config.preference_scope)
         self.preview_panel.set_caption_style(
             font_size=config.caption_font_size,
             color=config.caption_color,

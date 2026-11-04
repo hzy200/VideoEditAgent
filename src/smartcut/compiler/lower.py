@@ -21,6 +21,7 @@ from smartcut.contracts.audio import AudioAssetRef
 from smartcut.contracts.captions import CaptionCue
 from smartcut.contracts.edit_ir import EditIR
 from smartcut.contracts.encoder import EncoderProfile
+from smartcut.contracts.export_presets import preset_target
 from smartcut.contracts.faces import FaceReport
 from smartcut.contracts.overlay_assets import OverlayAssetRef
 from smartcut.contracts.time import RationalTime, rt_to_dict
@@ -160,6 +161,24 @@ def lower(
         )
         if use_faces and (faces is None or not faces.anchors):
             warnings.append("未检测到人脸，9:16 使用中心裁切")
+    else:
+        target = preset_target(ir.export.preset)
+        if target is not None:
+            target_width, target_height = target
+            fit_crop = compute_fit_crop(
+                facts.video.width,
+                facts.video.height,
+                faces,
+                use_faces=True,
+                target_width=target_width,
+                target_height=target_height,
+            )
+            warnings.append(
+                f"导出预设 {ir.export.preset}：输出 "
+                f"{target_width}x{target_height}"
+            )
+            if faces is None or not faces.anchors:
+                warnings.append("未检测到人脸，平台预设使用中心裁切")
 
     post_width = fit_crop.target_width if fit_crop is not None else facts.video.width
     post_height = fit_crop.target_height if fit_crop is not None else facts.video.height

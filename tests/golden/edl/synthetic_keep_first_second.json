@@ -1,0 +1,9 @@
+{
+  "name": "synthetic_keep_first_second",
+  "source_hash": "synthetic-testsrc2-320x240",
+  "goal": "保留前 1 秒",
+  "duration_seconds": 2.0,
+  "kept": [
+    {"start": 0.0, "end": 1.0, "tag": "rule"}
+  ]
+}

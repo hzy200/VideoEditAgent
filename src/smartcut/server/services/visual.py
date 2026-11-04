@@ -37,7 +37,7 @@ from smartcut.contracts.quality import QualityReport
 from smartcut.contracts.review import EditReview, RenderReview, ReviewIssue
 from smartcut.contracts.shots import ShotList
 from smartcut.contracts.templates import EditTemplate
-from smartcut.contracts.time import RationalTime
+from smartcut.contracts.time import RationalTime, seconds_from_mapping
 from smartcut.contracts.tools import ToolCall, ToolResult
 from smartcut.contracts.transcode import (
     AudioOutput,
@@ -82,6 +82,7 @@ from smartcut.planner.vision import (
     VisionImage,
     build_image_note_messages,
     chapters_needing_vision,
+    select_evidence_images,
     select_images,
 )
 from smartcut.policy import load_policy
@@ -142,6 +143,8 @@ class _VisionContext:
     cancel_token: Any
     usage_scope: str | None
     token_budget: int | None
+    transcript: Any | None = None
+    evidence: dict | None = None
 
 
 class VisualMixin:
@@ -175,14 +178,19 @@ class VisualMixin:
             return None
         vision_items, skipped = self._text_first_chapters(items)
         ctx = self._vision_context(
-            project_id, goal, cancel_token, usage_scope, token_budget
+            project_id,
+            goal,
+            cancel_token,
+            usage_scope,
+            token_budget,
+            chapter_ids=chapter_ids,
         )
         key = self._vision_notes_key(ctx, vision_items, skipped)
         cached = self._cached_visual_notes(ctx, key, skipped, started)
         if cached is not None:
             return cached
 
-        images = select_images(ctx.workspace, ctx.perception, vision_items, self.settings)
+        images = self._vision_images(ctx, vision_items)
         if not images:
             self._set_vision_unavailable(started, skipped, "no_images")
             return None
@@ -240,8 +248,25 @@ class VisualMixin:
         cancel_token: Any | None,
         usage_scope: str | None,
         token_budget: int | None,
+        *,
+        chapter_ids: list[str] | None = None,
     ) -> _VisionContext:
         asset = self._require_asset(project_id)
+        evidence = None
+        if self.settings.vision_use_evidence and self.settings.view_evidence_enabled:
+            try:
+                evidence = self.build_visual_evidence(
+                    project_id,
+                    chapter_ids=chapter_ids,
+                    cancel_token=cancel_token,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "visual_evidence_unavailable",
+                    project_id=project_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                evidence = None
         return _VisionContext(
             project_id=project_id,
             goal=goal,
@@ -252,6 +277,28 @@ class VisualMixin:
             cancel_token=cancel_token,
             usage_scope=usage_scope,
             token_budget=token_budget,
+            transcript=self.get_transcript(project_id),
+            evidence=evidence if (evidence or {}).get("available") else None,
+        )
+
+    def _vision_images(
+        self,
+        ctx: _VisionContext,
+        vision_items: list[dict],
+    ) -> list[VisionImage]:
+        if ctx.evidence is not None:
+            evidence_images = select_evidence_images(
+                ctx.workspace,
+                ctx.evidence,
+                self.settings,
+            )
+            if evidence_images:
+                return evidence_images
+        return select_images(
+            ctx.workspace,
+            ctx.perception,
+            vision_items,
+            self.settings,
         )
 
     def _vision_notes_key(
@@ -264,9 +311,20 @@ class VisualMixin:
             (str(item.get("id")), [str(path) for path in item.get("keyframes") or []])
             for item in vision_items
         ]
+        evidence = (ctx.evidence or {}).get("evidence") or {}
+        evidence_sig = (
+            evidence.get("id"),
+            evidence.get("render_hash"),
+            evidence.get("semantic_hash"),
+        )
+        transcript_sig = (
+            ctx.cache.key(ctx.transcript.model_dump_json())
+            if ctx.transcript is not None
+            else "none"
+        )
         return ctx.cache.key(
             ctx.source_hash,
-            "vision_notes_v4",
+            "vision_notes_v5",
             self.settings.vision_base_url,
             self.settings.vision_model,
             self.settings.vision_prompt_version,
@@ -276,6 +334,9 @@ class VisualMixin:
             self.settings.vision_chapter_tiles,
             self.settings.vision_max_keyframes_per_chapter,
             self.settings.vision_image_max_edge,
+            self.settings.vision_use_evidence,
+            evidence_sig,
+            transcript_sig,
             ctx.goal,
             image_paths,
             ctx.perception.get("contact_sheet"),
@@ -335,7 +396,7 @@ class VisualMixin:
     ) -> tuple[dict[str, ImageVisualNote], int, dict[str, int]]:
         def image_key(image: VisionImage) -> str:
             return ctx.cache.key(
-                "vision_image_v1",
+                "vision_image_v2",
                 image.sha256,
                 self.settings.vision_base_url,
                 self.settings.vision_model,
@@ -343,6 +404,13 @@ class VisualMixin:
                 ctx.goal,
                 image.chapter_id,
                 image.label,
+                image.evidence_id,
+                image.tile_metadata,
+                (
+                    ctx.cache.key(ctx.transcript.model_dump_json())
+                    if ctx.transcript is not None
+                    else "none"
+                ),
             )
 
         def compute() -> tuple[dict[str, ImageVisualNote], int]:
@@ -364,12 +432,18 @@ class VisualMixin:
 
             if missing:
                 notes = self._vision_analyze(
-                    build_image_note_messages(ctx.goal, vision_items, missing),
+                    build_image_note_messages(
+                        ctx.goal,
+                        vision_items,
+                        missing,
+                        transcript=ctx.transcript,
+                    ),
                     ImageVisualNotes,
                     cancel_token=ctx.cancel_token,
                     usage_scope=ctx.usage_scope,
                     token_budget=ctx.token_budget,
                 )
+                self._validate_evidence_refs(ctx, notes.images)
                 by_index = {item.image_index: item for item in notes.images}
                 for index, image in enumerate(missing):
                     note = by_index.get(index)
@@ -385,6 +459,7 @@ class VisualMixin:
                             summary=note.summary,
                             visual_tags=note.visual_tags,
                             cautions=note.cautions,
+                            evidence_refs=note.evidence_refs,
                         ).model_dump(mode="json"),
                         source_hash=ctx.source_hash,
                     )
@@ -414,9 +489,14 @@ class VisualMixin:
         for chapter in vision_items:
             chapter_id = str(chapter.get("id") or "")
             parts = [
-                image_notes[image.sha256]
+                note
                 for image in images
-                if image.sha256 in image_notes and image.chapter_id == chapter_id
+                if (note := self._note_for_chapter(
+                    image,
+                    image_notes.get(image.sha256),
+                    chapter,
+                ))
+                is not None
             ]
             if not parts:
                 continue
@@ -432,9 +512,63 @@ class VisualMixin:
                         [caution for item in parts for caution in item.cautions],
                         3,
                     ),
+                    evidence_refs=self._unique(
+                        [ref for item in parts for ref in item.evidence_refs],
+                        8,
+                    ),
                 )
             )
         return chapter_notes
+
+    def _note_for_chapter(
+        self,
+        image: VisionImage,
+        note: ImageVisualNote | None,
+        chapter: dict,
+    ) -> ImageVisualNote | None:
+        if note is None:
+            return None
+        chapter_id = str(chapter.get("id") or "")
+        if image.chapter_id:
+            return note if image.chapter_id == chapter_id else None
+        if not image.evidence_id:
+            return None
+        start = seconds_from_mapping(chapter.get("start"))
+        end = seconds_from_mapping(chapter.get("end"))
+        if start is None or end is None:
+            return note if note.evidence_refs else None
+        labels = {
+            str(tile.get("label"))
+            for tile in image.tile_metadata
+            if tile.get("t_seconds") is not None
+            and start <= float(tile["t_seconds"]) < end
+        }
+        if not labels:
+            return None
+        refs = [ref for ref in note.evidence_refs if ref in labels]
+        return note.model_copy(update={"evidence_refs": refs})
+
+    def _allowed_evidence_labels(self, ctx: _VisionContext) -> set[str]:
+        evidence = (ctx.evidence or {}).get("evidence") or {}
+        tiles = ((evidence.get("tile_map") or {}).get("tiles")) or []
+        return {str(tile.get("label")) for tile in tiles if tile.get("label")}
+
+    def _validate_evidence_refs(
+        self,
+        ctx: _VisionContext,
+        notes: list[ImageVisualNote],
+    ) -> None:
+        if ctx.evidence is None:
+            return
+        allowed = self._allowed_evidence_labels(ctx)
+        for note in notes:
+            if not note.evidence_refs:
+                continue
+            unknown = set(note.evidence_refs) - allowed
+            if unknown:
+                raise ValueError(
+                    f"VLM 引用了不存在的证据标签: {sorted(unknown)}"
+                )
 
     def _second_pass_notes(
         self,
@@ -461,7 +595,7 @@ class VisualMixin:
             for chapter_id in flagged_ids
             if chapter_id in chapter_map
         ]
-        deep_images = select_images(ctx.workspace, {}, flagged_items, self.settings)
+        deep_images = self._vision_images(ctx, flagged_items)
         flagged_images = [
             VisionImage(
                 label=f"复核：{image.label}",
@@ -470,6 +604,8 @@ class VisualMixin:
                 sha256=image.sha256,
                 size=image.size,
                 chapter_id=image.chapter_id,
+                evidence_id=image.evidence_id,
+                tile_metadata=image.tile_metadata,
             )
             for image in deep_images
         ]
@@ -478,13 +614,20 @@ class VisualMixin:
 
         def deep_key(image: VisionImage) -> str:
             return ctx.cache.key(
-                "vision_image_deep_v1",
+                "vision_image_deep_v2",
                 image.sha256,
                 self.settings.vision_base_url,
                 self.settings.vision_model,
                 self.settings.vision_prompt_version,
                 ctx.goal,
                 image.chapter_id,
+                image.evidence_id,
+                image.tile_metadata,
+                (
+                    ctx.cache.key(ctx.transcript.model_dump_json())
+                    if ctx.transcript is not None
+                    else "none"
+                ),
             )
 
         def compute_deep() -> dict[str, ImageVisualNote]:
@@ -509,12 +652,14 @@ class VisualMixin:
                         ctx.goal + "；请复核低置信度章节的画面细节与风险",
                         flagged_items,
                         missing,
+                        transcript=ctx.transcript,
                     ),
                     ImageVisualNotes,
                     cancel_token=ctx.cancel_token,
                     usage_scope=ctx.usage_scope,
                     token_budget=ctx.token_budget,
                 )
+                self._validate_evidence_refs(ctx, notes.images)
                 by_index = {item.image_index: item for item in notes.images}
                 for index, image in enumerate(missing):
                     note = by_index.get(index)
@@ -530,6 +675,7 @@ class VisualMixin:
                             summary=note.summary,
                             visual_tags=note.visual_tags,
                             cautions=note.cautions,
+                            evidence_refs=note.evidence_refs,
                         ).model_dump(mode="json"),
                         source_hash=ctx.source_hash,
                     )
@@ -541,7 +687,20 @@ class VisualMixin:
             self.settings.vision_model,
             self.settings.vision_prompt_version,
             ctx.goal,
-            [(image.sha256, image.chapter_id) for image in flagged_images],
+            [
+                (
+                    image.sha256,
+                    image.chapter_id,
+                    image.evidence_id,
+                    image.tile_metadata,
+                )
+                for image in flagged_images
+            ],
+            (
+                ctx.cache.key(ctx.transcript.model_dump_json())
+                if ctx.transcript is not None
+                else "none"
+            ),
         )
         deep_before = self._usage_snapshot(self.vision)
         deep_notes = self._vision_flights.run(deep_batch_key, compute_deep)
@@ -551,11 +710,18 @@ class VisualMixin:
         )
         usage = self._usage_add(usage, second_usage)
         by_chapter: dict[str, list[ImageVisualNote]] = {}
-        for image in flagged_images:
-            note = deep_notes.get(image.sha256)
-            if note is None:
+        for note in chapter_notes:
+            chapter = chapter_map.get(note.chapter_id)
+            if chapter is None:
                 continue
-            by_chapter.setdefault(str(image.chapter_id or ""), []).append(note)
+            for image in flagged_images:
+                filtered = self._note_for_chapter(
+                    image,
+                    deep_notes.get(image.sha256),
+                    chapter,
+                )
+                if filtered is not None:
+                    by_chapter.setdefault(note.chapter_id, []).append(filtered)
         second_pass_chapters = len(by_chapter)
         for note in chapter_notes:
             parts = by_chapter.get(note.chapter_id)
@@ -574,6 +740,10 @@ class VisualMixin:
                     *[item for part in parts for item in part.cautions],
                 ],
                 3,
+            )
+            note.evidence_refs = self._unique(
+                [*note.evidence_refs, *[ref for part in parts for ref in part.evidence_refs]],
+                8,
             )
         second_pass_images = len(flagged_images)
         return second_pass_images, deep_images, second_pass_chapters, usage
@@ -627,11 +797,14 @@ class VisualMixin:
             return None
 
         total_images = len(images) + second_pass_images
+        evidence = (ctx.evidence or {}).get("evidence") or {}
+        evidence_ids = [str(evidence.get("id"))] if evidence.get("id") else []
         payload = VisualNotes(
             chapters=chapter_notes,
             overall=overall,
             model=self.vision.model,
             image_count=total_images,
+            evidence_ids=evidence_ids,
         ).model_dump(mode="json")
         image_bytes = sum(image.size for image in images) + sum(
             image.size for image in deep_images
@@ -647,6 +820,10 @@ class VisualMixin:
                 "image_bytes": image_bytes,
                 "skipped_chapters": skipped,
                 "missing_images": missing_count,
+                "evidence_used": bool(evidence_ids),
+                "evidence_refs": sum(
+                    len(note.evidence_refs) for note in chapter_notes
+                ),
                 "second_pass_images": second_pass_images,
                 "second_pass_chapters": second_pass_chapters,
                 "duration_ms": duration_ms,
@@ -661,6 +838,10 @@ class VisualMixin:
                 "cache_hits": usage["cache_hits"],
                 "missing_images": missing_count,
                 "skipped_chapters": skipped,
+                "evidence_used": bool(evidence_ids),
+                "evidence_refs": sum(
+                    len(note.evidence_refs) for note in chapter_notes
+                ),
                 "second_pass_images": second_pass_images,
                 "second_pass_chapters": second_pass_chapters,
                 "duration_ms": duration_ms,

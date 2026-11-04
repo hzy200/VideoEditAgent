@@ -16,13 +16,18 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from smartcut.config import Settings
+from smartcut.contracts.edit_ir import EditIR
 from smartcut.desktop.settings_store import DesktopConfig, SettingsStore
 from smartcut.desktop.theme import apply_theme
+from smartcut.desktop.presets import SCENE_PRESETS
+from smartcut.desktop.widgets.ai_panel import AIPanel
 from smartcut.desktop.widgets.audio_panel import AudioPanel
 from smartcut.desktop.widgets.candidate_panel import CandidatePanel
 from smartcut.desktop.widgets.diagnostics_panel import DiagnosticsPanel
+from smartcut.desktop.widgets.evidence_panel import EvidencePanel
 from smartcut.desktop.widgets.inspector_panel import InspectorPanel
 from smartcut.desktop.widgets.metrics_panel import MetricsPanel
+from smartcut.desktop.widgets.preference_panel import PreferencePanel
 from smartcut.desktop.widgets.preview_panel import PreviewPanel
 from smartcut.desktop.widgets.project_panel import ProjectPanel
 from smartcut.desktop.widgets.queue_panel import QueuePanel
@@ -116,6 +121,196 @@ def test_timeline_edit_split_delete_move_undo_redo(app) -> None:
 
     panel.undo()
     assert panel.segments()[2]["tag"] == "new"
+
+
+def test_timeline_and_inspector_show_rationale(app) -> None:
+    ir = make_ir()
+    ir["sequence"][0]["rationale"] = "命中主题"
+    panel = TimelinePanel()
+    panel.set_ir(ir)
+    assert panel.table.item(0, 4).text() == "命中主题"
+    assert panel.segments()[0]["rationale"] == "命中主题"
+
+    inspector = InspectorPanel()
+    inspector.show_segment(panel.segments()[0])
+    text = inspector.segment_info.toPlainText()
+    assert "命中主题" in text
+    inspector.clear_segment()
+    assert "选择片段" in inspector.segment_info.toPlainText()
+
+
+def test_candidate_tooltip_includes_score_tags_and_quality(app) -> None:
+    panel = CandidatePanel()
+    panel.set_candidates(
+        {
+            "candidates": [
+                {
+                    "id": "c1",
+                    "source_range": {
+                        "start": {"value": 0, "rate": 90_000},
+                        "end": {"value": 90_000, "rate": 90_000},
+                    },
+                    "score": 0.87,
+                    "tags": ["主题"],
+                    "quality_flags": ["blurry"],
+                    "face_present": True,
+                    "shot_boundary": True,
+                    "text": "示例文本",
+                }
+            ]
+        }
+    )
+    tooltip = panel.table.item(0, 4).toolTip()
+    assert "0.87" in tooltip
+    assert "主题" in tooltip
+    assert "blurry" in tooltip
+
+
+def test_ai_panel_scene_presets_apply(app) -> None:
+    panel = AIPanel()
+    index = panel.preset_combo.findData("preset_shorts")
+    assert index > 0
+    panel.preset_combo.setCurrentIndex(index)
+    panel._apply_preset()
+    assert "60 秒" in panel.goal_text()
+    assert panel.vertical.isChecked()
+    assert panel.burn_captions.isChecked()
+    assert panel.remove_filler.isChecked()
+    assert not panel.only_analysis.isChecked()
+    assert panel.preset_combo.count() == len(SCENE_PRESETS) + 1
+
+
+def test_preference_panel_stats_and_scope_toggle(app) -> None:
+    panel = PreferencePanel()
+    scopes: list[str] = []
+    panel.scope_changed.connect(scopes.append)
+    panel.set_preference(
+        {
+            "stats": {
+                "sample_size": 3,
+                "median_segment_seconds": 2.5,
+                "keep_ratio": 0.42,
+                "top_tags": ["主题", "开场"],
+            },
+            "notes": ["历史用户剪辑 3 次"],
+        }
+    )
+    assert "样本数：3" in panel.summary.text()
+    assert "2.5s" in panel.summary.text()
+    assert "42%" in panel.summary.text()
+    assert "主题" in panel.tags.text()
+    panel.set_scope("project")
+    assert panel.pace_checkbox.isChecked()
+    panel.pace_checkbox.setChecked(False)
+    assert scopes == ["source"]
+
+
+def test_removed_segments_ignore_splits_but_detect_deletes(app) -> None:
+    from types import SimpleNamespace
+
+    from smartcut.desktop.main_window import MainWindow
+
+    base = {
+        "sequence": [
+            {"range": {"start": {"value": 0, "rate": 90_000}, "end": {"value": 180_000, "rate": 90_000}}, "tag": "drop"},
+            {"range": {"start": {"value": 270_000, "rate": 90_000}, "end": {"value": 360_000, "rate": 90_000}}, "tag": "keep"},
+            {"range": {"start": {"value": 450_000, "rate": 90_000}, "end": {"value": 540_000, "rate": 90_000}}, "tag": "split"},
+        ]
+    }
+    draft = EditIR.model_validate(
+        {
+            "project_id": "p",
+            "revision": 0,
+            "media_facts": {
+                "src": "media/a.mp4",
+                "duration": {"value": 900_000, "rate": 90_000},
+                "fps": "30/1",
+            },
+            "sequence": [
+                {"src": "media/a.mp4", "range": {"start": {"value": 270_000, "rate": 90_000}, "end": {"value": 360_000, "rate": 90_000}}, "tag": "keep"},
+                {"src": "media/a.mp4", "range": {"start": {"value": 450_000, "rate": 90_000}, "end": {"value": 495_000, "rate": 90_000}}, "tag": "split"},
+                {"src": "media/a.mp4", "range": {"start": {"value": 495_000, "rate": 90_000}, "end": {"value": 540_000, "rate": 90_000}}, "tag": "split"},
+            ],
+        }
+    )
+    ctx = SimpleNamespace(current_ir=base)
+    removed = MainWindow._removed_segments(ctx, draft)
+    assert [item["tag"] for item in removed] == ["drop"]
+
+
+def test_export_dialog_platform_presets_fill_profile(app) -> None:
+    from smartcut.desktop.widgets.export_dialog import ExportDialog
+
+    dialog = ExportDialog()
+    dialog.platform.setCurrentIndex(dialog.platform.findData("reels"))
+    profile = dialog.request().profile
+    assert (profile.width, profile.height) == (1080, 1920)
+    assert profile.video_codec == "libx264"
+    assert profile.scale_mode == "crop"
+
+    dialog.platform.setCurrentIndex(dialog.platform.findData("youtube"))
+    profile = dialog.request().profile
+    assert (profile.width, profile.height) == (1920, 1080)
+    assert profile.scale_mode == "fit"
+
+
+def _evidence_payload() -> dict:
+    return {
+        "available": True,
+        "cached": False,
+        "kind": "temporal_diff",
+        "image_ref": "cache/evidence/x/view.png",
+        "evidence": {
+            "meta": {"backend": "cpu"},
+            "tile_map": {
+                "tiles": [
+                    {
+                        "label": "T01",
+                        "t": {"value": 90_000, "rate": 90_000},
+                        "frame_no": 30,
+                        "pts": 30,
+                    },
+                    {
+                        "label": "T02",
+                        "t": {"value": 180_000, "rate": 90_000},
+                        "frame_no": 60,
+                        "pts": 60,
+                    },
+                ]
+            },
+        },
+        "selection": {
+            "windows": [
+                {
+                    "start": {"value": 0, "rate": 90_000},
+                    "end": {"value": 180_000, "rate": 90_000},
+                }
+            ]
+        },
+        "silence": [{"start": 1.0, "end": 1.5, "kind": "silence"}],
+    }
+
+
+def test_evidence_panel_shows_tiles_and_seeks(app) -> None:
+    panel = EvidencePanel()
+    seeks: list[float] = []
+    panel.seek_requested.connect(seeks.append)
+    panel.set_evidence(_evidence_payload())
+    assert panel.table.rowCount() == 2
+    assert panel.table.item(0, 0).text() == "T01"
+    assert "temporal_diff" not in panel.status.text()
+    panel.table.selectRow(1)
+    app.processEvents()
+    assert seeks and seeks[0] == pytest.approx(2.0)
+
+
+def test_timeline_evidence_overlay_items(app) -> None:
+    panel = TimelinePanel()
+    panel.set_ir(make_ir())
+    panel.set_evidence(_evidence_payload())
+    kinds = {item["kind"] for item in panel.timeline.evidence}
+    assert {"tile", "silence", "candidate"} <= kinds
+    assert any(item.get("label") == "T01" for item in panel.timeline.evidence)
 
 
 def test_timeline_add_candidates(app) -> None:
@@ -388,6 +583,21 @@ def test_timeline_diff_highlight(app) -> None:
     assert "diff" in panel.status_label.text()
     assert (1.0, 3.0) in panel.timeline._diff_added
     assert (5.0, 7.0) in panel.timeline._diff_removed
+
+
+def test_settings_advanced_collapsed_and_platform_presets(app, tmp_path) -> None:
+    store = SettingsStore(tmp_path)
+    dialog = SettingsDialog(
+        DesktopConfig(), Settings(workspace_root=tmp_path), store, tmp_path
+    )
+    assert dialog.advanced.isHidden()
+    values = {
+        dialog.export_preset.itemData(index)
+        for index in range(dialog.export_preset.count())
+    }
+    assert {"mp4_h264", "reels", "douyin", "youtube"} <= values
+    for index in range(dialog.export_preset.count()):
+        assert dialog.export_preset.model().item(index).isEnabled()
 
 
 def test_settings_dialog_theme_accessibility_fields(app, tmp_path) -> None:

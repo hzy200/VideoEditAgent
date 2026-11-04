@@ -37,6 +37,7 @@ class DesktopConfig:
     caption_color: str = "#FFFFFF"
     caption_position: str = "bottom"
     export_preset: str = "mp4_h264"
+    preference_scope: str = "source"
     theme: str = "dark"
     ui_scale: float = 1.0
     high_contrast: bool = False

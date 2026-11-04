@@ -17,6 +17,15 @@ SMARTCUT_VISION_IMAGE_MAX_EDGE=1024
 SMARTCUT_VISION_IMAGE_MAX_BYTES=4194304
 SMARTCUT_VISION_TOTAL_MAX_BYTES=12582912
 SMARTCUT_VISION_MAX_KEYFRAMES_PER_CHAPTER=2
+# M0–M2 视觉证据（默认优先，失败回退旧 contact sheet）
+SMARTCUT_VISION_USE_EVIDENCE=true
+SMARTCUT_VIEW_EVIDENCE_ENABLED=true
+SMARTCUT_VIEW_RENDERER=auto
+SMARTCUT_VIEW_MAX_IMAGES=7
+SMARTCUT_VIEW_MAX_WINDOWS=4
+SMARTCUT_VIEW_FPS=2
+SMARTCUT_VIEW_TILE_WIDTH=384
+SMARTCUT_VIEW_TILE_HEIGHT=216
 ```
 
 - 未配置 base_url/model 时完全禁用，不影响文本规划，也不产生 warning。
@@ -29,7 +38,7 @@ SMARTCUT_VISION_MAX_KEYFRAMES_PER_CHAPTER=2
 1. 全局 contact sheet 最多 1 张（来自 `cache/contactsheet/*.jpg`）。
 2. 选中章节各最多 2 张 keyframes（`ChapterPlan.keyframes`）。
 3. 总数 ≤7；按 sha256 去重；长边缩放到 ≤1024，统一转 JPEG q82。
-4. 单图/总字节上限遵循 `policy/vision.json` 与 Settings。
+4. 单图/总字节上限遵循 `src/smartcut/policies/vision.json` 与 Settings。
 5. 只用 workspace 内路径；缺失/损坏图片跳过，不阻断。
 
 ## 输出
@@ -65,6 +74,46 @@ VLM 返回：
 - 只有配置了 VLM 才会发送图片；默认关闭。
 - 发送的是缩放后的 JPEG，不包含源文件路径。
 - 日志不记录 base64 图片或 API Key。
+
+## 视觉证据层（M0）
+
+- 证据窗口从镜头切点、质量风险、章节边界、转写与粗扫帧生成；
+- 每个候选窗口按 `SMARTCUT_VIEW_FPS` 抽帧，使用 `extract_evidence_frames`
+  解析 showinfo 的真实 PTS，并受图片/token 硬预算约束；
+- CPU 参考渲染输出带 `T01` 编号的 contact sheet，重复帧先经 dHash 去除；
+- 产物包含 `evidence.json`（TileMap/测量/meta/render_hash/semantic_hash）与
+  `view.png`，按 `source_hash + policy_version + 渲染常量` 内容寻址缓存；
+- 失败或未抽帧时返回 warning，不阻断规划与渲染；M0 不直接写入 IR。
+- 默认 `SMARTCUT_VISION_USE_EVIDENCE=true`；设为 false 可回退旧 contact sheet。启用时 VLM 输入改为证据视图；
+  prompt 增加 `[Txx|秒]` 证据时间线与转写文本，要求输出 `evidence_refs`；
+  服务端校验标签必须存在于当前 TileMap，未知标签直接拒绝（不静默过滤）。
+- Planner 上下文注入 `visual_notes.chapters[].evidence_refs`；rationale 中引用的
+  `Txx` 必须存在于该集合，否则规划响应被拒绝。
+
+## Qt OpenGL 离屏渲染（M1）
+
+- `desktop/view/render_qtgl.py` 使用每线程 `QOffscreenSurface +
+  QOpenGLContext + QOpenGLFramebufferObject`，由 `QOpenGLPaintDevice + QPainter`
+  绘制 tile、编号与 bbox；shader 不计算光流。
+- 桌面 `view_renderer=auto` 注入 GL；server/CI 无注入时使用 CPU Pillow。
+- 上下文创建/绑定/驱动失败由服务层捕获，回退 CPU 并记录
+  `backend=cpu`、`renderer_fallback=true`。
+- `render_hash` 不含 backend；CPU/GL 用分块 dHash `semantic_hash` 比对
+  （≤6/64，通道均值差 ≤3/255）。
+- `--self-check` 执行 64×64 离屏渲染与 CPU 语义比对；不可用仅标记 degraded。
+- `scripts/benchmark_evidence_render.py` 输出 CPU/GL 渲染耗时，支持
+  `--assert-not-slower` 与 `--kind`。
+
+## 更多证据视图（M2）
+
+- `temporal_diff`：当前帧 + 帧差 + `hsv_hue_v1` 光流 + flow_x/flow_y 双通道；
+- `flow_strip`：沿轨迹堆叠 flow_x / flow_y / hue 三条带；
+- `bbox_overlay`：人脸/主体框叠层；
+- `roi_crop`：根据 tile 时间回原素材重新抽高分辨率帧，按 bbox 扩边裁切；
+- `codec_residual`：ffmpeg `codecview=mv=pf+bf+bb` 可视化，仅作证据，不输出数值 MV；
+- CPU/GL 分档预算：CPU 限制 tile 数与像素尺寸，GL 使用配置上限；
+- `EvidencePanel` 展示缩略图/Txx/时间码并点击定位；时间线只读叠加证据点、
+  静音区与候选窗口。
 
 ## 可选本地视觉后端
 

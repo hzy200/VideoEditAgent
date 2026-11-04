@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -48,6 +49,7 @@ def _to_trim_ops(draft: EditIRDraft) -> list[TrimOp]:
                 range=op.range,
                 tag=op.tag,
                 confidence=op.confidence,
+                rationale=op.rationale,
             )
             for op in draft.sequence
         ]
@@ -75,6 +77,10 @@ class DeepSeekPlanner:
 
     @property
     def available(self) -> bool:
+        return self.llm.available
+
+    @property
+    def llm_available(self) -> bool:
         return self.llm.available
 
     def close(self) -> None:
@@ -163,6 +169,9 @@ class DeepSeekPlanner:
                     )
                     allowed_ranges = self._chapter_ranges(selected_chapters)
 
+        allowed_labels = (
+            self._evidence_labels(visual_notes) if visual_notes else None
+        )
         messages = build_messages(
             facts,
             prompt_transcript,
@@ -189,6 +198,7 @@ class DeepSeekPlanner:
                     facts,
                     allowed_ranges,
                     check_effects=pinned_effects is None,
+                    allowed_labels=allowed_labels,
                 ),
                 max_repairs=MAX_REPAIR_ATTEMPTS,
                 cancel_token=cancel_token,
@@ -250,6 +260,9 @@ class DeepSeekPlanner:
             stats=context_stats,
             pinned_effects=pinned_effects,
         )
+        allowed_labels = (
+            self._evidence_labels(visual_notes) if visual_notes else None
+        )
         try:
             draft = self.llm.chat_json(
                 messages,
@@ -259,6 +272,7 @@ class DeepSeekPlanner:
                     ir.media_facts,
                     None,
                     check_effects=pinned_effects is None,
+                    allowed_labels=allowed_labels,
                 ),
                 max_repairs=MAX_REPAIR_ATTEMPTS,
                 temperature=0.15,
@@ -391,6 +405,36 @@ class DeepSeekPlanner:
             ) from exc
         return list(pinned_effects)
 
+    @staticmethod
+    def _evidence_labels(visual_notes: Any) -> set[str]:
+        if visual_notes is None:
+            return set()
+        payload = (
+            visual_notes
+            if isinstance(visual_notes, dict)
+            else visual_notes.model_dump(mode="json")
+        )
+        labels: set[str] = set()
+        for chapter in payload.get("chapters") or []:
+            labels.update(
+                str(ref) for ref in chapter.get("evidence_refs") or []
+            )
+        return labels
+
+    @staticmethod
+    def _check_evidence_refs(
+        draft: EditIRDraft,
+        allowed_labels: set[str],
+    ) -> None:
+        for index, op in enumerate(draft.sequence):
+            used = set(re.findall(r"T\d{2,3}", op.rationale or ""))
+            unknown = used - allowed_labels
+            if unknown:
+                raise ValueError(
+                    f"sequence[{index}].rationale 引用了不存在的证据标签: "
+                    f"{sorted(unknown)}"
+                )
+
     def _check_draft(
         self,
         draft: EditIRDraft,
@@ -398,7 +442,10 @@ class DeepSeekPlanner:
         allowed_ranges: list[tuple] | None = None,
         *,
         check_effects: bool = True,
+        allowed_labels: set[str] | None = None,
     ) -> None:
+        if allowed_labels is not None:
+            self._check_evidence_refs(draft, allowed_labels)
         for index, op in enumerate(draft.sequence):
             start = op.range.start.as_fraction()
             end = op.range.end.as_fraction()

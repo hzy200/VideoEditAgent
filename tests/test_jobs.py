@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from smartcut.contracts.tools import ToolResult
 from smartcut.errors import IRValidationError, RunCancelledError
-from smartcut.server.db import Database, Project
+from smartcut.server.db import (
+    Database,
+    Job,
+    Project,
+    ToolCallRecord,
+)
 from smartcut.server.jobs import JobReporter, JobService
 
 
@@ -138,6 +145,36 @@ def test_cancel_db_write_failure_still_calls_hook_and_cleans(
         jobs._update = original  # type: ignore[method-assign]
         gate.set()
         jobs.cancel(blocker_id)
+        jobs.shutdown(wait=True, timeout=5, cancel=True)
+        db.dispose()
+
+
+def test_job_finish_purges_expired_tool_records(tmp_path: Path) -> None:
+    jobs, db = _job_service(tmp_path)
+    old_time = datetime.now(timezone.utc) - timedelta(days=45)
+    with db.session() as session:
+        session.add(Job(id="job_old", project_id="p_jobs", kind="old", status="succeeded"))
+        session.add(
+            ToolCallRecord(
+                job_id="job_old",
+                seq=0,
+                tool="cut",
+                argv_json="[]",
+                created_at=old_time,
+            )
+        )
+        session.add(
+            ToolCallRecord(job_id="job_old", seq=1, tool="cut", argv_json="[]")
+        )
+    try:
+        jobs.submit("p_jobs", "quick", lambda reporter: {"ok": True})
+        assert jobs.shutdown(wait=True, timeout=5) is True
+        with db.session() as session:
+            records = session.scalars(
+                select(ToolCallRecord).order_by(ToolCallRecord.seq)
+            ).all()
+        assert [record.seq for record in records] == [1]
+    finally:
         jobs.shutdown(wait=True, timeout=5, cancel=True)
         db.dispose()
 

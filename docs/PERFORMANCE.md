@@ -189,7 +189,43 @@ python scripts/benchmark_long_video.py --src D:\video.mp4 --process-pool on --tr
 
 基准输出每阶段耗时、缓存命中、分析 engine、转写 worker/设备。
 
-## 11. 任务队列、项目生命周期与原子写
+## 11. 视觉证据层（M0–M2）
+
+### 指标
+
+`build_visual_evidence` 返回并写入 `evidence.json`/缓存 meta：
+
+- `extract_ms / measure_ms / render_ms / duration_ms`
+- `tiles / windows / estimated_tiles / estimated_tokens / dropped_windows`
+- `image_bytes / backend / renderer_fallback / cache_hits`
+- `kind`（contact_sheet / temporal_diff / flow_strip / bbox_overlay /
+  roi_crop / codec_residual）
+
+`render_hash` 用于同机复现，排除 backend/driver/耗时；CPU/GL 跨后端只比较
+`semantic_hash`（≤6/64，通道均值差 ≤3/255）。
+
+### 缓存与预算
+
+- 缓存键：`source_hash + kind + tile_index + backend + policy_version +
+  frames_key + transcript_sig + selection + 渲染常量`；
+- 目录：`cache/evidence/<key>/view.png + evidence.json`，临时目录原子替换；
+- top-K：镜头/质量/章节/转写/人脸种子 → 合并窗口 → 价格与 token 硬预算；
+- 设备分档：CPU 最多 5 图、tile ≤320×180；GL 使用配置上限；
+- 可重算缓存 prune 白名单包含 `evidence`，不淘汰 segments/renders/manifest/result。
+
+### GL/CPU 基准
+
+```bash
+python scripts/benchmark_evidence_render.py --tiles 9 --repeat 3 \
+  --kind temporal_diff --assert-not-slower
+```
+
+- GL 用每线程 `QOffscreenSurface/QOpenGLContext/FBO + QOpenGLPaintDevice`；
+- 绘制采用 source-rect 由 GPU 缩放，避免 CPU `QImage.scaled`；
+- 上下文/驱动失败自动回退 Pillow，记录 `backend=cpu`；
+- 本机 Windows 参考：temporal_diff CPU ≈96ms / GL ≈70ms（随素材与驱动变化）。
+
+## 12. 任务队列、项目生命周期与原子写
 
 ### 任务队列与生命周期
 
@@ -213,7 +249,7 @@ python scripts/benchmark_long_video.py --src D:\video.mp4 --process-pool on --tr
 - `ArtifactCache` 的哈希缓存与 `_project_caches` 均有锁，避免并发重复哈希
   或创建多个 cache 实例。
 
-## 12. 验证命令
+## 13. 验证命令
 
 ```bash
 conda activate video_edit
@@ -221,4 +257,7 @@ python -m pytest -q
 python -m pytest -q tests/test_resources.py tests/test_process_pool.py \
   tests/test_gpu_services.py tests/test_benchmark.py
 python scripts/check_drift.py
+python -m pytest -q -m eval
+python scripts/benchmark_evidence_render.py --tiles 9 --repeat 2 \
+  --kind temporal_diff --assert-not-slower
 ```

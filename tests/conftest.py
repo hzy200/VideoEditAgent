@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -14,6 +15,10 @@ from smartcut.runner.paths import Workspace
 def _require_binary(name: str) -> str:
     path = shutil.which(name)
     if path is None:
+        # CI 缺少 ffmpeg 时不能让几十个媒体测试静默跳过；必须直接失败，
+        # 否则“全绿”只代表测试没跑。
+        if os.environ.get("SMARTCUT_CI") == "1":
+            pytest.fail(f"CI 环境缺少 {name}：媒体测试不得静默跳过")
         pytest.skip(f"未找到 {name}，跳过需要 ffmpeg 的测试")
     return path
 
@@ -46,6 +51,8 @@ def settings(workspace: Workspace, ffmpeg_bin: str, ffprobe_bin: str) -> Setting
         deepseek_api_key=None,
         hardware_encoding="off",
         hardware_decoding="off",
+        # 旧视觉测试保持 contact sheet/keyframe 路径；M0.6 证据引用有专项测试。
+        vision_use_evidence=False,
     )
 
 

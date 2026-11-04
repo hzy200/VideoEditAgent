@@ -133,6 +133,18 @@ class DecisionAgent:
             lines.append(
                 f"候选片段：{ctx.shared.candidates.get('candidate_count', 0)} 个。"
             )
+        plan = next((item for item in ledger if item.agent == "plan"), None)
+        if plan is not None and plan.output.get("source"):
+            source = str(plan.output.get("source"))
+            label = {
+                "llm": "AI 规划",
+                "rule": "规则规划（离线，未使用 AI）",
+                "manual": "手工 IR",
+            }.get(source, source)
+            lines.append(
+                f"规划来源：{label}，revision {plan.output.get('revision')}，"
+                f"保留 {plan.output.get('segments', 0)} 段。"
+            )
         timeline = ctx.shared.timeline
         if timeline is not None:
             lines.append(
@@ -195,7 +207,8 @@ class DecisionAgent:
             lines.append("本次按要求只做分析与规划，未执行渲染。")
         elif ctx.shared.revision is None:
             lines.append(
-                "本次未产出成片：未生成 EditIR（未配置 DeepSeek Key 且未提供手工 IR）。"
+                "本次未产出成片：未生成 EditIR"
+                "（规划不可用，或已关闭离线规则兜底且未提供手工 IR）。"
             )
         else:
             lines.append("本次未产出成片：规划或渲染未完成。")

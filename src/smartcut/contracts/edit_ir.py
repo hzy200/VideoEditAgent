@@ -60,6 +60,8 @@ class TrimOp(BaseModel):
     speed: float = Field(default=1.0, ge=0.5, le=2.0, allow_inf_nan=False)
     tag: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    # 规则/LLM 给出的短理由；仅供解释与审片展示，不参与编译。
+    rationale: str | None = Field(default=None, max_length=120)
 
     def output_duration(self) -> RationalTime:
         return RationalTime.from_fraction(

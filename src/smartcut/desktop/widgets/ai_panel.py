@@ -6,6 +6,7 @@ from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -19,6 +20,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from smartcut.desktop.presets import SCENE_PRESETS
+
 
 class AIPanel(QWidget):
     run_requested = Signal(str, bool, bool)
@@ -29,6 +32,16 @@ class AIPanel(QWidget):
         super().__init__(parent)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
+
+        preset_row = QHBoxLayout()
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItem("场景预设…", None)
+        for preset in SCENE_PRESETS:
+            self.preset_combo.addItem(preset.name, preset.id)
+        self.preset_button = QPushButton("应用预设")
+        preset_row.addWidget(self.preset_combo, 1)
+        preset_row.addWidget(self.preset_button)
+        layout.addLayout(preset_row)
 
         layout.addWidget(QLabel("告诉 SmartCut 你想要什么："))
         self.goal_edit = QTextEdit()
@@ -101,6 +114,7 @@ class AIPanel(QWidget):
         self.ledger.verticalHeader().setVisible(False)
         layout.addWidget(self.ledger, 1)
 
+        self.preset_button.clicked.connect(self._apply_preset)
         self.run_button.clicked.connect(self._emit_run)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
         self.review_button.clicked.connect(self.review_requested.emit)
@@ -176,6 +190,24 @@ class AIPanel(QWidget):
         self.ledger.setRowCount(0)
         self.progress.setValue(0)
         self.status_label.setText("空闲")
+
+    def _apply_preset(self) -> None:
+        preset_id = self.preset_combo.currentData()
+        preset = next(
+            (item for item in SCENE_PRESETS if item.id == preset_id),
+            None,
+        )
+        if preset is None:
+            return
+        self.goal_edit.setPlainText(preset.goal)
+        self.vertical.setChecked(preset.aspect == "9:16")
+        self.burn_captions.setChecked(preset.burn_captions)
+        self.loudness.setChecked(bool(preset.loudness))
+        self.remove_filler.setChecked(preset.remove_filler)
+        self.only_analysis.setChecked(not preset.allow_render)
+        self.outline_first.setChecked(preset.phase == "outline")
+        self.fast_outline.setChecked(preset.phase == "fast_outline")
+        self.audio_first.setChecked(preset.phase == "audio_first")
 
     def _emit_run(self) -> None:
         extras: list[str] = []

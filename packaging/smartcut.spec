@@ -37,6 +37,8 @@ hiddenimports = [
     "keyring.backends.Windows",
     "PySide6.QtMultimedia",
     "PySide6.QtMultimediaWidgets",
+    "PySide6.QtOpenGL",
+    "PySide6.QtOpenGLWidgets",
 ]
 hiddenimports += collect_submodules("keyring.backends")
 hiddenimports += collect_submodules("scenedetect")

@@ -120,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
             caption_font_size=config.caption_font_size,
             caption_color=config.caption_color,
             caption_position=config.caption_position,
+            preference_scope=config.preference_scope,
             whisper_model=config.whisper_model,
             whisper_model_path=str(whisper_dir) if whisper_dir else None,
             whisper_device=base.whisper_device,
@@ -137,8 +138,22 @@ def main(argv: list[str] | None = None) -> int:
             db,
             settings.max_workers,
             max_pending=settings.max_pending_jobs,
+            tool_audit_retention_days=settings.tool_audit_retention_days,
         )
-        services = Services(settings, db, jobs)
+        view_renderer = None
+        if str(settings.view_renderer).lower() != "cpu":
+            try:
+                from smartcut.desktop.view.render_qtgl import QtEvidenceRenderer
+
+                view_renderer = QtEvidenceRenderer()
+            except Exception:
+                view_renderer = None
+        services = Services(
+            settings,
+            db,
+            jobs,
+            view_renderer=view_renderer,
+        )
         controller = DesktopController(settings, services, jobs)
         window = MainWindow(controller, settings, store, data_dir)
         window.show()
@@ -271,6 +286,25 @@ def _run_self_check(settings: Settings, data_dir: Path) -> int:
             }
     else:
         checks["whisper_transcribe"] = {"ok": False, "error": "模型路径不存在"}
+
+    try:
+        from smartcut.desktop.view.render_qtgl import render_selfcheck
+
+        result = render_selfcheck(width=64, height=64)
+        checks["opengl"] = {
+            **result,
+            # GL 是可选加速；失败只记录降级，不影响整体 self-check。
+            "ok": True,
+            "available": bool(result.get("ok")),
+            "degraded": not bool(result.get("ok")),
+        }
+    except Exception as exc:
+        checks["opengl"] = {
+            "ok": True,
+            "available": False,
+            "degraded": True,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
     ok = all(item.get("ok") for item in checks.values())
     (data_dir / "selfcheck.json").write_text(

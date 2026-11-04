@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -19,6 +20,26 @@ from sqlalchemy.exc import IntegrityError
 from smartcut.server.atomic import atomic_write_text
 from smartcut.server.db import Artifact, Database
 
+# 只允许淘汰可重算产物；segments/renders/manifest/result 等不可重算
+# 缓存必须保留，否则用户成片或运行快照会被误删。
+PRUNABLE_KINDS = frozenset(
+    {
+        "frames",
+        "scenes",
+        "quality",
+        "quality_chapter",
+        "faces",
+        "faces_chapter",
+        "contactsheet",
+        "llm",
+        "vision",
+        "transcript",
+        "transcripts",
+        "audio_chunks",
+        "evidence",
+    }
+)
+
 
 class ArtifactCache:
     def __init__(self, db: Database, workspace_root: Path) -> None:
@@ -27,6 +48,7 @@ class ArtifactCache:
         self._hashes: dict[str, tuple[tuple[int, int], str]] = {}
         self._trusted: set[str] = set()
         self._hash_lock = threading.Lock()
+        self._prune_lock = threading.Lock()
 
     def source_hash(self, path: Path) -> str:
         path = Path(path).resolve()
@@ -261,6 +283,99 @@ class ArtifactCache:
         path = self.cache_path(kind, key, ".txt")
         atomic_write_text(path, value)
         return self.put(project_id, kind, key, path)
+
+    def prune(
+        self,
+        project_id: str,
+        *,
+        max_bytes: int,
+        dry_run: bool = False,
+    ) -> dict:
+        """按项目淘汰可重算缓存，直到其总量不超过 ``max_bytes``。
+
+        只处理 ``PRUNABLE_KINDS``；segments/renders/manifest/result 永不删除。
+        调用方必须保证该项目没有活动任务（见
+        ``JobService.prune_project_cache``），避免删除正在生成的缓存。
+        """
+        if max_bytes <= 0:
+            return {
+                "project_id": project_id,
+                "pruned": 0,
+                "freed_bytes": 0,
+                "remaining_bytes": 0,
+                "dry_run": dry_run,
+            }
+        with self._prune_lock:
+            with self.db.session() as session:
+                rows = session.scalars(
+                    select(Artifact)
+                    .where(
+                        Artifact.project_id == project_id,
+                        Artifact.kind.in_(sorted(PRUNABLE_KINDS)),
+                    )
+                    .order_by(Artifact.updated_at.asc(), Artifact.id.asc())
+                ).all()
+                sizes = [self._artifact_size(row.path) for row in rows]
+                total = sum(sizes)
+                freed = 0
+                pruned = 0
+                for row, size in zip(rows, sizes):
+                    if total - freed <= max_bytes:
+                        break
+                    if not dry_run:
+                        self._delete_artifact(row.path)
+                        session.delete(row)
+                    freed += size
+                    pruned += 1
+        return {
+            "project_id": project_id,
+            "pruned": pruned,
+            "freed_bytes": freed,
+            "remaining_bytes": max(0, total - freed),
+            "dry_run": dry_run,
+        }
+
+    def _safe_artifact_path(self, relative: str) -> Path | None:
+        try:
+            path = self.resolve(relative)
+            path.relative_to(self.workspace_root)
+        except (ValueError, OSError):
+            return None
+        if path == self.workspace_root:
+            return None
+        return path
+
+    def _artifact_size(self, relative: str) -> int:
+        path = self._safe_artifact_path(relative)
+        if path is None or not path.exists():
+            return 0
+        if path.is_file():
+            try:
+                return path.stat().st_size
+            except OSError:
+                return 0
+        total = 0
+        for child in path.rglob("*"):
+            if not child.is_file():
+                continue
+            try:
+                total += child.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    def _delete_artifact(self, relative: str) -> None:
+        path = self._safe_artifact_path(relative)
+        if path is None:
+            return
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.exists():
+                path.unlink()
+        except OSError:
+            # 缓存清理是尽力而为；单个文件被占用不能阻断其余淘汰。
+            return
 
 
 class ArtifactLLMCache:

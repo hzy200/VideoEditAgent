@@ -52,6 +52,8 @@ class DesktopController(QObject):
     preview_mix_ready = Signal(object)
     effects_preview_ready = Signal(object)
     render_reviewed = Signal(object)
+    preference_changed = Signal(object)
+    evidence_changed = Signal(object)
     operation_done = Signal(str, object)
     error = Signal(str)
 
@@ -137,6 +139,7 @@ class DesktopController(QObject):
             self.artifacts_changed.emit(result["artifacts"])
             self.perception_changed.emit(result.get("perception") or {})
             self.audio_assets_changed.emit(result.get("audio_assets") or [])
+            self.refresh_preference(result["project"]["id"])
             if result.get("outline"):
                 self.outline_ready.emit(result["outline"])
             if result.get("resumable_runs"):
@@ -194,6 +197,16 @@ class DesktopController(QObject):
         elif op in {"plan", "revision"}:
             if result.get("project_id") == current:
                 self.refresh_revisions()
+                self.refresh_preference()
+        elif op == "preference":
+            if result.get("project_id") == current:
+                self.preference_changed.emit(result.get("preference"))
+        elif op == "segment_reject":
+            if int(result.get("recorded") or 0) > 0:
+                self.refresh_preference()
+        elif op == "evidence":
+            if result.get("project_id") == current:
+                self.evidence_changed.emit(result)
         elif op == "run_detail":
             if result.get("project_id") == current:
                 self.run_finished.emit(result)
@@ -627,6 +640,51 @@ class DesktopController(QObject):
             return result
 
         self._run("revision", call)
+
+    def record_segment_reject(self, segments: list[dict]) -> None:
+        pid = self._require_project()
+        if not pid or not segments:
+            return
+
+        def call() -> dict:
+            result = self.services.record_segment_reject(pid, segments)
+            result["project_id"] = pid
+            return result
+
+        self._run("segment_reject", call)
+
+    def build_evidence(self, kind: str = "contact_sheet") -> None:
+        pid = self._require_project()
+        if not pid:
+            return
+
+        def call() -> dict:
+            result = self.services.build_visual_evidence(pid, kind=kind)
+            result["project_id"] = pid
+            return result
+
+        self._run("evidence", call)
+
+    def refresh_preference(self, project_id: str | None = None) -> None:
+        pid = project_id or self._require_project()
+        if not pid:
+            return
+
+        def call() -> dict:
+            # 偏好是可选增强：项目尚未 ingest 时返回 None，不产生错误提示。
+            try:
+                preference = self.services.get_edit_preference(pid)
+            except Exception:
+                preference = None
+            return {"project_id": pid, "preference": preference}
+
+        self._run("preference", call)
+
+    def set_preference_scope(self, scope: str) -> None:
+        value = "project" if scope == "project" else "source"
+        self.settings.preference_scope = value
+        self.services.settings.preference_scope = value
+        self.refresh_preference()
 
     def load_revision(self, revision_no: int) -> None:
         pid = self._require_project()

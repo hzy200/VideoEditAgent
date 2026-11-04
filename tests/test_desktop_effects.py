@@ -234,6 +234,18 @@ def test_main_window_manual_effect_roundtrip(
         )
 
         window = MainWindow(controller, settings, store, tmp_path / "data")
+        assert window.tabs.count() == 4
+        assert [window.tabs.tabText(index) for index in range(4)] == [
+            "剪辑",
+            "素材与感知",
+            "包装",
+            "运行与诊断",
+        ]
+        window._show_panel(window.subtitle_panel)
+        assert window.tabs.currentIndex() == 2
+        assert window.tabs.currentWidget().currentWidget() is window.subtitle_panel
+        window._show_panel(window.outline_panel)
+        assert window.tabs.currentIndex() == 1
         _pump(app, controller, rounds=10)
         controller.open_project(project["id"])
         _pump(app, controller)

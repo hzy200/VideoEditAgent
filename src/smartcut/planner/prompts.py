@@ -36,7 +36,8 @@ SYSTEM_PROMPT = """你是视频粗剪决策器，只输出一个 JSON 对象，�
 9. audio.bgm 必须为 null；remove_filler 可为 true/false。
 10. export 使用 {"preset": "mp4_h264", "burn_captions": 布尔值, "cut_mode": "reencode"}；
     只有用户要求字幕/烧录时才把 burn_captions 设为 true。
-11. 每个片段给出简短 tag 与 0-1 的 confidence。
+11. 每个片段给出简短 tag、0-1 的 confidence 与不超过 30 字的 rationale
+    （选段依据，纯文本，不得包含路径、命令或像素坐标）。
 12. 如果转写降级，只能基于媒体事实/感知摘要给出保守的整段保留方案。
 13. 可使用 perception.shots / quality_counts / face_frame_count 辅助选段与包装决策，
     但不要输出任何像素坐标、文件路径或命令。
@@ -45,8 +46,10 @@ SYSTEM_PROMPT = """你是视频粗剪决策器，只输出一个 JSON 对象，�
 15. candidates 是按目标检索出的候选片段，包含源时间、文本、质量标记与人脸信息。
     优先从候选中选择保留区间；候选只是建议，仍须满足上面的区间与章节约束。
     不要输出 candidate id，也不要输出坐标、路径或命令。
-16. visual_notes 是视觉模型对 contact sheet/章节关键帧的摘要；只作为选段辅助，
+16. visual_notes 是视觉模型对 contact sheet/章节关键帧/视觉证据的摘要；只作为选段辅助，
     不要把它当作新的时间信息，也不要输出图片路径、坐标或视觉模型命令。
+    visual_notes.chapters[].evidence_refs 是真实存在的 Txx 证据帧编号；rationale
+    只能引用这些已存在标签，禁止编造标签或把标签换算成时间/切点。
 17. 如果提供了人工确认的章节，只能在这些章节范围内选择，不要扩展到其他章节。
 18. 用户明确要求“去口癖/去掉语气词/删除嗯呃”时，把 audio.remove_filler 设为 true；
     AudioAgent 会依据词级时间戳做局部修复。
@@ -152,6 +155,7 @@ def build_review_messages(
                 "end_seconds": op.range.end.to_ffmpeg_seconds(),
                 "tag": op.tag,
                 "confidence": op.confidence,
+                "rationale": op.rationale,
             }
             for index, op in enumerate(ir.sequence)
         ],
@@ -234,6 +238,7 @@ def build_replan_messages(
             "end_seconds": op.range.end.to_ffmpeg_seconds(),
             "tag": op.tag,
             "confidence": op.confidence,
+            "rationale": op.rationale,
         }
         for index, op in enumerate(ir.sequence)
     ]

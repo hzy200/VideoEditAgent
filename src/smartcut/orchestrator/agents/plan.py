@@ -52,7 +52,7 @@ class PlanAgent:
                 ctx.goal,
                 **plan_kwargs,
             )
-            source = "llm"
+            source = str(result.get("source") or "llm")
 
         revision = int(result["revision"])
         ir = EditIR.model_validate(result["ir"])

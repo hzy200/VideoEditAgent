@@ -252,6 +252,7 @@ def test_orchestrator_manual_ir_without_api_key(
 def test_orchestrator_without_planner_or_manual_ir(
     settings: Settings, synthetic_video: Path
 ) -> None:
+    settings = settings.model_copy(update={"planner_offline_fallback": False})
     app = create_app(settings, transcriber=NullTranscriber())
     with TestClient(app) as client:
         project_id, _facts, _workspace = _setup(client, synthetic_video)
@@ -265,7 +266,7 @@ def test_orchestrator_without_planner_or_manual_ir(
 
         run = client.get(f"/api/runs/{response.json()['run_id']}").json()
         assert run["status"] == "succeeded"
-        assert "未配置 DeepSeek Key" in run["answer"]
+        assert "未生成 EditIR" in run["answer"]
         assert not any(item.startswith("renders/") for item in run["artifacts"])
         agents = {item["agent"] for item in run["ledger"]}
         assert {
@@ -281,6 +282,28 @@ def test_orchestrator_without_planner_or_manual_ir(
         } <= agents
         assert "plan" not in agents
         assert "critic" not in agents
+
+
+def test_orchestrator_offline_rule_planner_runs_full_dag(
+    settings: Settings, synthetic_video: Path
+) -> None:
+    app = create_app(settings, transcriber=NullTranscriber())
+    with TestClient(app) as client:
+        project_id, _facts, _workspace = _setup(client, synthetic_video)
+        response = client.post(
+            f"/api/projects/{project_id}/orchestrate",
+            json={"goal": "保留前 1 秒", "allow_render": False},
+        )
+        assert response.status_code == 202, response.text
+        job = _wait_for_job(client, response.json()["job_id"])
+        assert job["status"] == "succeeded", job
+
+        run = client.get(f"/api/runs/{response.json()['run_id']}").json()
+        assert run["status"] == "succeeded", run
+        ledger = {item["agent"]: item for item in run["ledger"]}
+        assert {"plan", "audio", "critic", "qa"} <= set(ledger)
+        assert ledger["plan"]["output"]["source"] == "rule"
+        assert "规则规划（离线" in run["answer"]
 
 
 def test_orchestrator_allow_render_false(

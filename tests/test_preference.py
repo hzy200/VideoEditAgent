@@ -79,6 +79,41 @@ def test_user_edits_produce_preference_stats(
         db.dispose()
 
 
+def test_rejected_tags_are_excluded_from_preference(
+    settings: Settings,
+    synthetic_video: Path,
+) -> None:
+    services, jobs, db = _services(settings)
+    try:
+        project_id = services.create_project("pref-reject")["id"]
+        services.ingest(project_id, str(synthetic_video))
+        facts = services.get_media_facts(project_id)
+        services.submit_revision(
+            project_id,
+            _ir(project_id, facts, [("0", "0.8"), ("1", "1.8")]),
+            origin="user",
+        )
+        services.submit_revision(
+            project_id,
+            _ir(project_id, facts, [("0", "0.8"), ("1", "1.8")]),
+            origin="user",
+        )
+        result = services.record_segment_reject(
+            project_id,
+            [{"start": 1.0, "end": 1.8, "tag": "t1"}],
+        )
+        assert result["recorded"] == 1
+
+        preference = services.get_edit_preference(project_id)
+        assert preference is not None
+        assert preference["stats"]["top_tags"] == ["t0"]
+        assert any("被拒标签" in note for note in preference["notes"])
+    finally:
+        services.close()
+        jobs.shutdown()
+        db.dispose()
+
+
 def test_preference_is_scoped_to_current_source(
     settings: Settings,
     synthetic_video: Path,

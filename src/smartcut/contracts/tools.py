@@ -18,6 +18,7 @@ ToolName = Literal[
     "extract_audio",
     "proxy",
     "extract_frames",
+    "extract_evidence_frames",
     "fit",
     "subtitles",
     "loudnorm",

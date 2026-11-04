@@ -7,6 +7,7 @@ from smartcut.runner.tools import (
     compose,
     concat,
     cut,
+    evidence_frames,
     extract_audio,
     fit,
     frames,
@@ -52,6 +53,12 @@ TOOLS: dict[str, ToolDef] = {
         args_model=frames.ExtractFramesArgs,
         build_argv=frames.build_argv,
         prepare=frames.prepare,
+    ),
+    "extract_evidence_frames": ToolDef(
+        name="extract_evidence_frames",
+        args_model=evidence_frames.EvidenceWindowsArgs,
+        build_argv=evidence_frames.build_argv,
+        prepare=evidence_frames.prepare,
     ),
     "fit": ToolDef(
         name="fit",

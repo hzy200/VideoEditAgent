@@ -5,7 +5,7 @@
 
 | # | 不变量 | 强制点 |
 |---|---|---|
-| 1 | 源文件只读，所有处理在项目工作区副本上 | `server/services.py` ingest/upload；工作区测试 |
+| 1 | 源文件只读，所有处理在项目工作区副本上 | `server/services/facade.py` ingest/upload；工作区测试 |
 | 2 | 所有工具路径必须是 workspace 相对路径，拒绝绝对路径/`..`/NUL/符号链接逃逸 | `runner/paths.py`；`tests/test_contracts.py` |
 | 3 | 只有 Runner 能起子进程，`shell=False` + 白名单工具 | `runner/execute.py`；`runner/tools/registry.py` |
 | 4 | 时间只用 `RationalTime`，IR/工具边界才转十进制 | `contracts/time.py`；`tests/test_contracts.py` |
@@ -19,17 +19,17 @@
 | 12 | fit/subtitles/loudnorm 必须走 Compiler + Runner | `compiler/lower.py`、`runner/tools/` |
 | 13 | LLM 输出必须经过 Pydantic 校验与有限修复 | `llm/client.py`、`planner/client.py` |
 | 14 | 生产/测试默认关闭硬件编码时可完全复现 libx264 argv | `compiler/encoding.py`；`tests/test_compiler.py`、`test_encoders.py` |
-| 15 | 硬件编码失败必须回退 libx264，不得让渲染静默失败 | `server/services.py::_execute_with_fallback`；`tests/test_encoders.py` |
-| 16 | Segment 缓存键不包含输出路径；跨 revision 只复用同裁剪参数 | `server/services.py::_cut_cache_key`；`tests/test_segment_cache.py` |
-| 17 | 并行 cut 受 `ffmpeg_concurrency` 限制，结果按 seq 排序 | `server/services.py::_render_impl` |
-| 18 | 大纲确认必须创建新 run，不修改旧 run 的 ledger | `server/services.py::approve_outline`；`tests/test_outline_flow.py` |
+| 15 | 硬件编码失败必须回退 libx264，不得让渲染静默失败 | `server/services/rendering.py::_execute_with_fallback`；`tests/test_encoders.py` |
+| 16 | Segment 缓存键不包含输出路径；跨 revision 只复用同裁剪参数 | `server/services/rendering.py::_cut_cache_key`；`tests/test_segment_cache.py` |
+| 17 | 并行 cut 受 `ffmpeg_concurrency` 限制，结果按 seq 排序 | `server/services/rendering.py::_render_impl` |
+| 18 | 大纲确认必须创建新 run，不修改旧 run 的 ledger | `server/services/orchestration.py::approve_outline`；`tests/test_outline_flow.py` |
 | 19 | Phase B 使用人工确认章节，Planner 不得再次做章节选择 | `planner/client.py::propose`；`tests/test_outline_flow.py` |
 | 20 | 视觉输入只发送项目内图片，未配置 VLM 时完全禁用 | `planner/vision.py`、`llm/vision.py`；`tests/test_vision.py` |
-| 21 | 视觉失败必须降级为纯文本规划，不阻断渲染 | `server/services.py::plan`；`tests/test_vision.py` |
+| 21 | 视觉失败必须降级为纯文本规划，不阻断渲染 | `server/services/facade.py::plan`；`tests/test_vision.py` |
 | 22 | agent/tool/encoder/phase 必须与 `src/smartcut/policies/*.json` 一致；phase 名称以 `contracts.templates.Phase` 为类型源，`workflow.json` 为任务图唯一源（`agents.json` 不再保存 phase 成员表） | `policy.py::validate_consistency`；`tests/test_policy_drift.py`；`scripts/check_drift.py` |
 | 23 | Agent 只能通过 `AgentToolkit` 访问业务能力，不得直接起进程/操作媒体 | `orchestrator/context.py`；AGENTS.md |
 | 24 | 桌面 QWidget 不直接调用 Services/subprocess/httpx | `desktop/controller.py`；桌面测试 |
-| 25 | source_hash 在 ingest 写入 DB，后续不得重复全量哈希 | `server/services.py::_register_asset/_source_hash`；`tests/test_cache.py` |
+| 25 | source_hash 在 ingest 写入 DB，后续不得重复全量哈希 | `server/services/facade.py::_register_asset`、`server/services/base.py::_source_hash`；`tests/test_cache.py` |
 | 26 | 项目 bundle 独立查询并行；运行列表不得返回完整 ledger/plan | `desktop/controller.py`、`list_orchestration_run_summaries` |
 | 27 | fit+字幕+响度合并为一次 `postprocess`；仅响度时视频 copy | `compiler/lower.py`、`runner/tools/postprocess.py` |
 | 28 | 任务图必须依赖驱动调度，短分支不得等待长并行任务 | `orchestrator/graph.py`；`tests/test_orchestrator_graph.py` |
@@ -87,6 +87,14 @@
 | 80 | OpenCV 进程池必须有取消/超时 watchdog；触发时 terminate 整个池，不得无限等待单帧 | `perception/process_pool.py`；`tests/test_process_pool.py` |
 | 81 | 字幕、manifest、检查点、结果快照、缓存 JSON 与工具 `dst` 必须临时文件 + 原子替换；抽帧目录成功后才整体替换 | `server/atomic.py`、`perception/frames.py`、`runner/execute.py`；缓存/frames 测试 |
 | 82 | `ArtifactCache` 哈希缓存与项目缓存注册表必须加锁，避免并发重复哈希/多实例 | `server/cache.py`、`services/base.py::_cache_for`；`tests/test_cache.py` |
+| 83 | 无 Key 时规则规划必须标注 `source=rule`，不得冒充 AI；重规划无变化不得新建 revision | `planner/hybrid.py`、`services.plan/replan`；`tests/test_rule_planner.py` |
+| 84 | 用户删除片段必须写 `segment_reject`；偏好统计排除被拒标签，拆分/裁剪不得误判为拒绝 | `desktop/main_window._removed_segments`、`services.record_segment_reject/get_edit_preference`；`tests/test_preference.py` |
+| 85 | 平台导出预设只映射画幅（reels/douyin 1080x1920、youtube 1920x1080）；copy 模式必须拒绝需要裁切的预设 | `contracts/export_presets.py`、`compiler/validate.py`、`compiler/lower.py`；`tests/test_compiler.py` |
+| 86 | VisualEvidence 只作候选证据；renderer 只接收 MeasureResult，不得访问原始素材或写 IR/时间线 | `contracts/visual_evidence.py`、`perception/view/`；`tests/test_evidence_render_cpu.py` |
+| 87 | `render_hash` 排除 backend/driver/耗时；meta 必填常量缺失必须拒绝；证据缓存键包含 policy/渲染常量 | `perception/view/synthesizer.py`、`contracts/visual_evidence.py`、`services/evidence.py`；`tests/test_visual_evidence_contract.py` |
+| 88 | VLM/Planner 的 `evidence_refs` 只能引用真实 Txx；未知标签必须拒绝，不得静默采信 | `contracts/vision.py`、`planner/client.py::_check_evidence_refs`、`services/visual.py`；`tests/test_evidence_citations.py` |
+| 89 | GL 渲染器只做拼版/编号/叠层，不得计算光流或访问源素材；每线程独立 context，失败必须回退 CPU 并记录 backend | `desktop/view/render_qtgl.py`、`services/evidence.py::_synthesize_evidence`；`tests/test_gl_renderer.py`、`tests/test_evidence_service.py` |
+| 90 | M2 视图（帧差/光流条带/bbox/ROI/codecview）只作候选证据；codecview 不承诺数值级 MV；ROI 必须回原素材取高分辨率；UI 叠层只读 | `perception/view/flow.py`、`views.py`、`services/evidence.py`、`desktop/widgets/evidence_panel.py`；`tests/test_evidence_views.py` |
 
 ## 新增功能的检查清单
 

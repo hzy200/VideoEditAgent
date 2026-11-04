@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from smartcut.contracts.export_presets import EXPORT_PRESETS, preset_target
 from smartcut.contracts.transcode import (
     AudioOutput,
     MetadataOptions,
@@ -59,6 +60,14 @@ class ExportDialog(QDialog):
         if render_rel:
             self.source.addItem("当前成片", "render")
         form.addRow("源", self.source)
+
+        self.platform = QComboBox()
+        self.platform.addItem("自定义", "custom")
+        for name in ("reels", "douyin", "youtube"):
+            preset = EXPORT_PRESETS[name]
+            self.platform.addItem(preset.description, name)
+        self.platform.currentIndexChanged.connect(self._apply_platform)
+        form.addRow("平台预设", self.platform)
 
         self.container = QComboBox()
         for value in ("mp4", "mov", "mkv"):
@@ -179,6 +188,28 @@ class ExportDialog(QDialog):
         for value in _CONTAINER_SUBTITLE[container]:
             self.subtitle_codec.addItem(value, value)
         self._on_video_codec_changed()
+
+    def _apply_platform(self) -> None:
+        name = str(self.platform.currentData() or "custom")
+        target = preset_target(name)
+        if target is None:
+            return
+        self.container.setCurrentIndex(
+            max(0, self.container.findData("mp4"))
+        )
+        self._refresh_codecs()
+        self.video_codec.setCurrentIndex(
+            max(0, self.video_codec.findData("libx264"))
+        )
+        width, height = target
+        self.width.setValue(width)
+        self.height.setValue(height)
+        self.scale_mode.setCurrentIndex(
+            max(0, self.scale_mode.findData("fit" if name == "youtube" else "crop"))
+        )
+        self.fps.setText("30")
+        self.fps_mode.setCurrentIndex(max(0, self.fps_mode.findData("cfr")))
+        self.crf.setValue(18 if name == "youtube" else 20)
 
     def _on_video_codec_changed(self) -> None:
         copy_mode = str(self.video_codec.currentData() or "") == "copy"

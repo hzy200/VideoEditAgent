@@ -55,6 +55,8 @@ def _manual_ir(project_id: str, facts: dict) -> dict:
 
 
 def test_p0_end_to_end(settings: Settings, synthetic_video: Path) -> None:
+    # 关闭离线规则兜底，验证“无 Key 且无兜底”时仍可用手工 IR 完成 P0 闭环。
+    settings = settings.model_copy(update={"planner_offline_fallback": False})
     app = create_app(settings, transcriber=NullTranscriber())
     with TestClient(app) as client:
         assert client.get("/api/health").json() == {"status": "ok"}
@@ -81,7 +83,7 @@ def test_p0_end_to_end(settings: Settings, synthetic_video: Path) -> None:
         # 导入只读源文件，副本在工作区内。
         assert _sha256(synthetic_video) == source_hash
 
-        # 未配置 Key 时，规划接口明确返回 503，不阻塞手工闭环。
+        # 未配置 Key 且关闭离线兜底时，规划接口明确返回 503，不阻塞手工闭环。
         planned = client.post(
             f"/api/projects/{project_id}/plan",
             json={"goal": "keep everything"},

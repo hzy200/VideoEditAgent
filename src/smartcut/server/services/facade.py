@@ -130,6 +130,20 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _plan_signature(ir: EditIR) -> tuple:
+    """用于判断重规划是否真的改动了时间线（忽略 revision 编号）。"""
+    return (
+        ir.sequence,
+        ir.effects,
+        ir.transitions,
+        ir.overlays,
+        ir.removals,
+        ir.audio,
+        ir.subtitles,
+        ir.export,
+    )
+
+
 def _safe_filename(name: str) -> str:
     base = Path(name).name
     cleaned = _SAFE_FILENAME.sub("_", base).strip("._")
@@ -137,6 +151,7 @@ def _safe_filename(name: str) -> str:
 
 
 from smartcut.server.services.base import ServiceBase
+from smartcut.server.services.evidence import EvidenceMixin
 from smartcut.server.services.orchestration import OrchestrationMixin
 from smartcut.server.services.perception import PerceptionMixin
 from smartcut.server.services.rendering import RenderMixin
@@ -144,6 +159,7 @@ from smartcut.server.services.visual import VisualMixin
 
 
 class Services(
+    EvidenceMixin,
     VisualMixin,
     RenderMixin,
     PerceptionMixin,
@@ -511,6 +527,17 @@ class Services(
     def delete_project(self, project_id: str) -> dict:
         with self.jobs.project_lifecycle(project_id, for_delete=True):
             return self._delete_project_locked(project_id)
+
+    def prune_cache(self, project_id: str, *, dry_run: bool = False) -> dict:
+        """淘汰项目可重算缓存到 ``cache_max_mb`` 上限；有活动任务则跳过。"""
+        self._require_project(project_id)
+        cache = self._cache_for(project_id)
+        return self.jobs.prune_project_cache(
+            project_id,
+            cache,
+            max_bytes=int(self.settings.cache_max_mb) * 1024 * 1024,
+            dry_run=dry_run,
+        )
 
     def _delete_project_locked(self, project_id: str) -> dict:
         self._require_project(project_id)
@@ -1426,17 +1453,72 @@ class Services(
 
     def _record_feedback(self, project_id: str, kind: str, ir: EditIR) -> None:
         """记录用户编辑的结构化节奏统计；失败不得影响保存。"""
-        try:
-            source_hash = self._source_hash(project_id, self._require_asset(project_id))
-            durations = [op.range.duration().to_float() for op in ir.sequence]
-            payload = {
+        durations = [op.range.duration().to_float() for op in ir.sequence]
+        self._write_feedback(
+            project_id,
+            kind,
+            {
                 "source_duration": ir.media_facts.duration.to_float(),
                 "output_duration": float(sum(durations)),
                 "segments": [
                     {"duration": round(duration, 3), "tag": op.tag}
                     for duration, op in zip(durations, ir.sequence)
                 ][:200],
-            }
+            },
+        )
+
+    def record_segment_reject(
+        self,
+        project_id: str,
+        segments: list[dict],
+    ) -> dict:
+        """记录用户保存前删除的片段，供偏好统计排除被拒标签。"""
+        self._require_project(project_id)
+        asset = self._require_asset(project_id)
+        facts = MediaFacts.model_validate_json(asset.facts_json)
+        cleaned: list[dict] = []
+        for segment in segments[:200]:
+            try:
+                start = float(segment.get("start"))
+                end = float(segment.get("end"))
+            except (TypeError, ValueError):
+                continue
+            duration = max(0.0, end - start)
+            if duration <= 0:
+                continue
+            tag = segment.get("tag")
+            cleaned.append(
+                {
+                    "duration": round(duration, 3),
+                    "tag": str(tag)[:24] if tag else None,
+                }
+            )
+        if not cleaned:
+            return {"recorded": 0}
+        self._write_feedback(
+            project_id,
+            "segment_reject",
+            {
+                "source_duration": facts.duration.to_float(),
+                "output_duration": float(
+                    sum(item["duration"] for item in cleaned)
+                ),
+                "segments": cleaned,
+                "rejected": True,
+            },
+        )
+        return {"recorded": len(cleaned)}
+
+    def _write_feedback(
+        self,
+        project_id: str,
+        kind: str,
+        payload: dict,
+    ) -> None:
+        try:
+            source_hash = self._source_hash(
+                project_id, self._require_asset(project_id)
+            )
             with self.db.session() as session:
                 session.add(
                     EditFeedback(
@@ -1458,19 +1540,39 @@ class Services(
         """聚合最近用户编辑的节奏统计；样本不足时返回 None。"""
         asset = self._require_asset(project_id)
         current_hash = self._source_hash(project_id, asset)
+        filters = [EditFeedback.project_id == project_id]
+        if self.settings.preference_scope != "project":
+            filters.append(EditFeedback.source_hash == current_hash)
         with self.db.session() as session:
-            query = select(EditFeedback).where(
-                EditFeedback.project_id == project_id
-            )
-            if self.settings.preference_scope != "project":
-                query = query.where(EditFeedback.source_hash == current_hash)
             rows = session.scalars(
-                query.order_by(
+                select(EditFeedback)
+                .where(
+                    *filters,
+                    EditFeedback.kind.in_(("manual_revision", "patch")),
+                )
+                .order_by(
                     EditFeedback.created_at.desc(), EditFeedback.id.desc()
                 ).limit(50)
             ).all()
+            reject_rows = session.scalars(
+                select(EditFeedback).where(
+                    *filters,
+                    EditFeedback.kind == "segment_reject",
+                )
+            ).all()
         if len(rows) < 2:
             return None
+
+        rejected_tags: set[str] = set()
+        for row in reject_rows:
+            try:
+                payload = json.loads(row.payload_json)
+            except (TypeError, ValueError):
+                continue
+            for item in payload.get("segments") or []:
+                tag = item.get("tag")
+                if isinstance(tag, str) and tag.strip():
+                    rejected_tags.add(tag.strip()[:24])
 
         durations: list[float] = []
         keep_ratios: list[float] = []
@@ -1492,7 +1594,11 @@ class Services(
                 except (TypeError, ValueError):
                     continue
                 tag = item.get("tag")
-                if isinstance(tag, str) and tag.strip():
+                if (
+                    isinstance(tag, str)
+                    and tag.strip()
+                    and tag.strip()[:24] not in rejected_tags
+                ):
                     tags[tag.strip()[:24]] += 1
         if not durations or not keep_ratios:
             return None
@@ -1511,6 +1617,10 @@ class Services(
             f"{stats.median_segment_seconds:.1f}s，"
             f"保留率中位 {stats.keep_ratio:.0%}"
         ]
+        if rejected_tags:
+            notes.append(
+                "已排除被拒标签：" + "、".join(sorted(rejected_tags)[:5])
+            )
         preference = EditPreference(
             project_id=project_id,
             source_hash=current_hash,
@@ -1584,6 +1694,19 @@ class Services(
         ir = replanner(base, transcript, goal, review or {}, **kwargs)
         usage = self._usage_delta(before, self._usage_snapshot(self.planner))
         validate_ir(ir)
+        source = "llm" if self.planner_llm_available else "rule"
+        if _plan_signature(ir) == _plan_signature(base):
+            # 离线规则规划不会改写时间线；不得制造一个重复 revision。
+            return {
+                "revision": revision_no,
+                "previous_revision": revision_no,
+                "changed": False,
+                "ir": base.dump_ir(),
+                "usage": usage,
+                "metrics": {"context": context_stats},
+                "warnings": [],
+                "source": source,
+            }
         stored = EditIR(
             project_id=project_id,
             revision=0,
@@ -1601,10 +1724,12 @@ class Services(
         return {
             "revision": new_no,
             "previous_revision": revision_no,
+            "changed": True,
             "ir": stored.dump_ir(),
             "usage": usage,
             "metrics": {"context": context_stats},
             "warnings": [],
+            "source": source,
         }
 
     def plan(
@@ -1773,6 +1898,7 @@ class Services(
         return {
             "revision": revision_no,
             "ir": stored.dump_ir(),
+            "source": "llm" if self.planner_llm_available else "rule",
             "transcript_degraded": transcript.degraded if transcript is not None else True,
             "visual_notes_used": bool(visual_notes),
             "memory_used": bool(memory),
@@ -1806,7 +1932,7 @@ class Services(
         transcript = self.get_transcript(project_id)
         perception = self.get_perception(project_id)
         warnings: list[str] = []
-        if self.planner_available:
+        if self.planner_available and self.planner_llm_available:
             before = self._usage_snapshot(self.planner)
             try:
                 review_kwargs = {

@@ -110,9 +110,27 @@ class CandidatePanel(QWidget):
                 ", ".join(str(tag) for tag in tags[:3]),
             ]
             self.table.setItem(row, _THUMB_COLUMN, QTableWidgetItem(""))
+            flags = candidate.get("quality_flags") or []
+            tooltip_lines = [
+                f"分数：{float(candidate.get('score') or 0):.2f}",
+                f"标签：{', '.join(str(tag) for tag in tags) or '-'}",
+                (
+                    f"质量：{', '.join(str(flag) for flag in flags)}"
+                    if flags
+                    else "质量：无标记"
+                ),
+                (
+                    f"人脸：{'有' if candidate.get('face_present') else '无'}"
+                    f" · 镜头边界：{'是' if candidate.get('shot_boundary') else '否'}"
+                ),
+            ]
+            text = str(candidate.get("text") or "")
+            if text:
+                tooltip_lines.extend(["", text])
+            tooltip = "\n".join(tooltip_lines)
             for column, value in enumerate(values, start=_THUMB_COLUMN + 1):
                 item = QTableWidgetItem(value)
-                item.setToolTip(str(candidate.get("text") or ""))
+                item.setToolTip(tooltip)
                 self.table.setItem(row, column, item)
             self._request_thumb(row, candidate)
         source = payload.get("source") or "empty"
@@ -206,6 +224,7 @@ class CandidatePanel(QWidget):
                         "end": end,
                         "tags": candidate.get("tags") or [],
                         "text": candidate.get("text") or "",
+                        "score": candidate.get("score"),
                     }
                 )
         if selected:

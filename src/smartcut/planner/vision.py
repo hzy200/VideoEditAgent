@@ -39,6 +39,8 @@ class VisionImage:
     sha256: str
     size: int
     chapter_id: str | None = None
+    evidence_id: str | None = None
+    tile_metadata: tuple[dict[str, Any], ...] = ()
 
 
 def _encode_image(
@@ -174,6 +176,64 @@ def chapters_needing_vision(
     return result
 
 
+def select_evidence_images(
+    workspace: Workspace,
+    evidence: dict | None,
+    settings: Settings,
+) -> list[VisionImage]:
+    """把已被 top-K 预算筛选过的证据视图编码为 VLM 图片。"""
+    payload = (evidence or {}).get("evidence") or {}
+    image_ref = str((evidence or {}).get("image_ref") or payload.get("image_ref") or "")
+    if not payload or not image_ref:
+        return []
+    tiles = ((payload.get("tile_map") or {}).get("tiles")) or []
+    metadata = tuple(
+        {
+            "label": str(tile.get("label") or ""),
+            "t_seconds": seconds_from_mapping(tile.get("t")),
+            "pts": tile.get("pts"),
+            "frame_no": tile.get("frame_no"),
+        }
+        for tile in tiles
+    )
+    labels = [item["label"] for item in metadata if item["label"]]
+    label_text = (
+        f"（{labels[0]}–{labels[-1]}）" if len(labels) > 1 else f"（{labels[0]}）" if labels else ""
+    )
+    image = _encode_image(
+        workspace,
+        image_ref,
+        f"视觉证据视图{label_text}",
+        settings,
+    )
+    if image is None:
+        return []
+    image = VisionImage(
+        label=image.label,
+        mime=image.mime,
+        data_url=image.data_url,
+        sha256=image.sha256,
+        size=image.size,
+        evidence_id=str(payload.get("id") or ""),
+        tile_metadata=metadata,
+    )
+    seen = {image.sha256}
+    total = image.size
+    images = [image]
+    for extra in (evidence or {}).get("extra_images") or []:
+        if len(images) >= settings.vision_max_images:
+            break
+        item = _encode_image(workspace, str(extra), "证据补充视图", settings)
+        if item is None or item.sha256 in seen:
+            continue
+        if total + item.size > settings.vision_total_max_bytes:
+            break
+        seen.add(item.sha256)
+        total += item.size
+        images.append(item)
+    return images
+
+
 def select_images(
     workspace: Workspace,
     perception: dict | None,
@@ -239,16 +299,58 @@ IMAGE_NOTES_SYSTEM_PROMPT = """你是视频关键帧描述器。只输出一个 
 - image_index：必须与输入一致；
 - summary：1-2 句画面内容/人物/场景描述；
 - visual_tags：最多 5 个短标签；
-- cautions：最多 3 条画面风险（模糊、遮挡、无主体等）。
-不要输出文件路径、像素坐标、ffmpeg 命令或时间线操作。
+- cautions：最多 3 条画面风险（模糊、遮挡、无主体等）；
+- evidence_refs：仅当图片带 evidence_id/tiles 时输出，最多 5 个与描述最相关的
+  Txx 标签；只能引用输入中真实存在的标签，引用不存在的标签视为错误。
+证据时间线给出 [Txx|秒] 与相邻语音文本，只用于理解画面与语音关系；
+不得输出时间算术、切点建议、文件路径、像素坐标或 ffmpeg 命令。
 输出必须符合以下 Schema：
 """
+
+
+def _evidence_timeline(
+    images: list[VisionImage],
+    transcript: Any | None,
+) -> str:
+    entries: list[tuple[str, float, str]] = []
+    seen: set[str] = set()
+    segments = list(getattr(transcript, "segments", []) or []) if transcript else []
+    for image in images:
+        for tile in image.tile_metadata:
+            label = str(tile.get("label") or "")
+            seconds = tile.get("t_seconds")
+            if not label or label in seen or seconds is None:
+                continue
+            seen.add(label)
+            text = ""
+            for segment in segments:
+                start = segment.start.to_float()
+                end = segment.end.to_float()
+                if start <= float(seconds) < end:
+                    text = segment.text.strip()
+                    break
+            if not text and segments:
+                nearest = min(
+                    segments,
+                    key=lambda segment: abs(segment.start.to_float() - float(seconds)),
+                )
+                if abs(nearest.start.to_float() - float(seconds)) <= 2.0:
+                    text = nearest.text.strip()
+            entries.append((label, float(seconds), text))
+    entries.sort(key=lambda item: (item[1], item[0]))
+    lines = []
+    for label, seconds, text in entries[:64]:
+        speech = f"[语音] {text[:80]}" if text else "[无语音]"
+        lines.append(f"[{label}|{seconds:.3f}s] {speech}")
+    return "\n".join(lines)
 
 
 def build_image_note_messages(
     goal: str,
     chapters: list[dict[str, Any]],
     images: list[VisionImage],
+    *,
+    transcript: Any | None = None,
 ) -> list[dict[str, Any]]:
     schema = json.dumps(
         ImageVisualNotes.model_json_schema(by_alias=True),
@@ -264,16 +366,16 @@ def build_image_note_messages(
                 "chapter_id": image.chapter_id,
                 "chapter_title": chapter.get("title"),
                 "label": image.label,
+                "evidence_id": image.evidence_id,
+                "tiles": list(image.tile_metadata),
             }
         )
+    timeline = _evidence_timeline(images, transcript)
+    header = f"目标：{goal}\n图片元数据：{json.dumps(image_meta, ensure_ascii=False)}"
+    if timeline:
+        header += f"\n证据时间线：\n{timeline}"
     user_content: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": (
-                f"目标：{goal}\n"
-                f"图片元数据：{json.dumps(image_meta, ensure_ascii=False)}"
-            ),
-        }
+        {"type": "text", "text": header}
     ]
     for index, image in enumerate(images):
         user_content.append(

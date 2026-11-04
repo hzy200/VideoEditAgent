@@ -91,8 +91,10 @@ class TimelinePanel(QWidget):
         self.status_label.setStyleSheet("color:#64748b;")
         layout.addWidget(self.status_label)
 
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["标签", "开始(s)", "结束(s)", "置信度"])
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["标签", "开始(s)", "结束(s)", "置信度", "依据"]
+        )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -133,6 +135,7 @@ class TimelinePanel(QWidget):
         self.table.blockSignals(False)
         self.timeline.set_data(0.0, [])
         self.timeline.set_overlays([], [])
+        self.timeline.set_evidence([])
         self.timeline.set_thumbnails([])
         self.timeline.set_waveform([])
         self.timeline.set_audio_tracks([])
@@ -146,6 +149,52 @@ class TimelinePanel(QWidget):
         shots = ((data or {}).get("shots") or {}).get("shots") or []
         marks = ((data or {}).get("quality") or {}).get("marks") or []
         self.timeline.set_overlays(shots, marks)
+
+    def set_evidence(self, payload: dict | None) -> None:
+        if not payload or not payload.get("available"):
+            self.timeline.set_evidence([])
+            return
+        evidence = payload.get("evidence") or {}
+        items: list[dict] = []
+        for tile in (evidence.get("tile_map") or {}).get("tiles") or []:
+            try:
+                seconds = float(tile["t"]["value"]) / float(tile["t"]["rate"])
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                continue
+            items.append(
+                {
+                    "start": max(0.0, seconds - 0.2),
+                    "end": seconds + 0.2,
+                    "kind": "tile",
+                    "label": str(tile.get("label") or ""),
+                }
+            )
+        for gap in payload.get("silence") or []:
+            items.append(
+                {
+                    "start": float(gap.get("start") or 0.0),
+                    "end": float(gap.get("end") or 0.0),
+                    "kind": "silence",
+                    "label": "静音",
+                }
+            )
+        for window in (payload.get("selection") or {}).get("windows") or []:
+            try:
+                start = (
+                    float(window["start"]["value"]) / float(window["start"]["rate"])
+                )
+                end = float(window["end"]["value"]) / float(window["end"]["rate"])
+            except (KeyError, TypeError, ValueError, ZeroDivisionError):
+                continue
+            items.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "kind": "candidate",
+                    "label": "候选窗口",
+                }
+            )
+        self.timeline.set_evidence(items)
 
     def set_frame_manifest(self, frames: list[dict], workspace: Path) -> None:
         self._thumb_times.clear()
@@ -208,6 +257,7 @@ class TimelinePanel(QWidget):
                     "end": end,
                     "tag": op.get("tag") or "",
                     "confidence": op.get("confidence"),
+                    "rationale": op.get("rationale"),
                 }
             )
         self._undo.clear()
@@ -231,6 +281,7 @@ class TimelinePanel(QWidget):
                 continue
             tag_item = self.table.item(row, 0)
             confidence_item = self.table.item(row, 3)
+            rationale_item = self.table.item(row, 4)
             confidence = None
             if confidence_item is not None and confidence_item.text().strip():
                 try:
@@ -244,6 +295,9 @@ class TimelinePanel(QWidget):
                     "end": end,
                     "tag": tag_item.text().strip() if tag_item else "",
                     "confidence": confidence,
+                    "rationale": (
+                        rationale_item.text().strip() if rationale_item else ""
+                    ),
                 }
             )
         return segments
@@ -288,11 +342,17 @@ class TimelinePanel(QWidget):
                 f"{float(segment.get('start') or 0):.3f}",
                 f"{float(segment.get('end') or 0):.3f}",
                 f"{float(confidence):.2f}" if confidence is not None else "",
+                str(segment.get("rationale") or ""),
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 if column == 0:
                     item.setToolTip("片段标签，可编辑")
+                if column == 4:
+                    item.setToolTip(value or "无选段依据")
+                    item.setFlags(
+                        item.flags() & ~Qt.ItemFlag.ItemIsEditable
+                    )
                 self.table.setItem(row, column, item)
         if selected is not None and 0 <= selected < len(segments):
             self.table.setCurrentCell(selected, 0)
@@ -362,7 +422,14 @@ class TimelinePanel(QWidget):
         row = max(0, self.table.currentRow() + 1)
         segments.insert(
             row,
-            {"id": None, "start": start, "end": end, "tag": tag, "confidence": None},
+            {
+                "id": None,
+                "start": start,
+                "end": end,
+                "tag": tag,
+                "confidence": None,
+                "rationale": "手动添加",
+            },
         )
         self._commit(segments, selected=row)
 
@@ -386,13 +453,16 @@ class TimelinePanel(QWidget):
             end = max(start + MIN_SEGMENT, min(end, self.duration))
             tags = candidate.get("tags") or []
             tag = str(tags[0]) if tags else "候选"
+            text = str(candidate.get("text") or "").strip()
+            rationale = (f"候选：{text[:50]}" if text else "候选片段").strip()
             segments.append(
                 {
                     "id": None,
                     "start": start,
                     "end": end,
                     "tag": tag,
-                    "confidence": None,
+                    "confidence": candidate.get("score"),
+                    "rationale": rationale,
                 }
             )
         if len(segments) == row:

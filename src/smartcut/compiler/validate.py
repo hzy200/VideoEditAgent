@@ -5,6 +5,7 @@ from __future__ import annotations
 from smartcut.compiler.loudness import parse_target_lufs
 from smartcut.contracts.effects import enabled_segment_effects, validate_effects
 from smartcut.contracts.edit_ir import EditIR
+from smartcut.contracts.export_presets import EXPORT_PRESETS, preset_target
 from smartcut.errors import IRValidationError, UnsupportedFeature
 
 
@@ -90,8 +91,13 @@ def validate_ir(ir: EditIR) -> None:
     has_fit = any(
         effect.type == "fit" and effect.enabled for effect in ir.effects
     )
-    output_width = 1080 if has_fit else facts.width
-    output_height = 1920 if has_fit else facts.height
+    target = preset_target(ir.export.preset)
+    if has_fit:
+        output_width, output_height = 1080, 1920
+    elif target is not None:
+        output_width, output_height = target
+    else:
+        output_width, output_height = facts.width, facts.height
     seen_removals: set[str] = set()
     for removal in ir.removals:
         if removal.id in seen_removals:
@@ -118,9 +124,11 @@ def validate_ir(ir: EditIR) -> None:
     if ir.audio.bgm is not None:
         raise UnsupportedFeature("P1 不支持 BGM 混音")
 
-    if ir.export.preset != "mp4_h264":
+    if ir.export.preset not in EXPORT_PRESETS:
+        raise UnsupportedFeature(f"未知导出预设: {ir.export.preset!r}")
+    if ir.export.cut_mode == "copy" and preset_target(ir.export.preset):
         raise UnsupportedFeature(
-            f"P1 只支持 mp4_h264 预设，收到 {ir.export.preset!r}"
+            "平台导出预设需要裁切/缩放；请把 export.cut_mode 设为 reencode"
         )
     if ir.export.fps is not None:
         raise UnsupportedFeature("P1 不改帧率；fps 预设延后到 P2")

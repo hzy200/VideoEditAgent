@@ -103,6 +103,10 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
   明确 `thread_safe` 时启用，GPU 默认 1 worker；缓存写入留在主线程。
 - 不得让多个 worker 共享同一个 CTranslate2 模型，也不得绕开 `cpu_slot`。
 - 视觉摘要必须双层缓存：整图路径键优先命中；未命中时按单图 sha256 只补缺失图。
+- 视觉证据层只能产出候选证据：`VisualEvidence` 不得写 IR/时间线；renderer 只接收
+  `MeasureResult`，不得访问原始素材路径；PTS/frame_no 与哈希必须可复现。
+- 证据缓存键必须包含 source_hash、policy_version 与渲染常量；`render_hash` 不得
+  包含 backend/driver/耗时，CPU/GL 只比较 `semantic_hash`。
 - 硬件编码器必须做一次极小试编码；`-encoders` 列表不能作为可用性结论。
 - 质量/人脸按帧并行时必须逐帧获取 `cpu_slot`；Haar Cascade 使用 thread-local。
 - 质量/人脸分析受 `SMARTCUT_PERCEPTION_MAX_FRAMES` 限制，并优先保留镜头切点帧。
@@ -124,6 +128,14 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
 - 字幕、manifest、检查点、结果快照、缓存 JSON 与工具 `dst` 必须临时文件 +
   原子替换；抽帧目录成功后再整体替换。
 - `ArtifactCache` 哈希缓存与项目缓存注册表必须加锁，禁止并发重复哈希或多实例。
+- 视觉证据缓存的键必须包含 source_hash、policy_version 与渲染常量；
+  `render_hash` 不得包含 backend/driver/耗时，CPU/GL 只比较 `semantic_hash`。
+- VLM/Planner 的 `evidence_refs` 只能引用当前 TileMap 中真实存在的 Txx 标签；
+  未知标签必须拒绝，不得静默过滤或回退到自由描述。
+- OpenGL 渲染器只做拼版/编号/bbox 叠层，禁止在 shader 中计算光流、帧差或
+  直方图；每线程独立 context，失败必须回退 CPU 并记录 `backend=cpu`。
+- M2 视图（帧差/光流条带/bbox/ROI/codecview）只作候选证据；codecview 不承诺
+  数值级运动向量；ROI 必须回原素材取高分辨率，UI 证据叠层不得写 IR。
 - 未保存时间线在切换项目或退出前必须确认；保存完成后再执行原动作。
 - 窗口布局/最近项目等 UI 状态只能写 `desktop.json`；不得写进项目工作区。
 - 桌面任务进度只用 Qt 信号；SSE 仅供可选服务端，WebSocket 未实现。
@@ -229,7 +241,7 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
 - 让 LLM 或 VLM 输出图片路径、crop 坐标、章节边界或 ffmpeg 参数。
 - 在未配置 VLM 时发送图片，或把 DeepSeek Key 发往非 DeepSeek 的 VLM 端点。
 - 把硬件编码器探测放在模块导入/启动时，或失败后静默改用软件编码而不记录。
-- 绕过 `policy.json` 新增 agent/tool/encoder，或让旧数据库缺列继续运行。
+- 绕过 `src/smartcut/policies/*.json` 新增 agent/tool/encoder，或让旧数据库缺列继续运行。
 - 在每次 Services 实例化/项目打开时重新计算整个源文件 SHA256。
 - 为 fit+字幕+响度分别启动多次全片重编码。
 - 在任务图里用轮次屏障阻塞已就绪任务。

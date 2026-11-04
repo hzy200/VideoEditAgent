@@ -8,11 +8,11 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from smartcut.cancel import CancellationToken
 from smartcut.contracts.tools import ToolResult
@@ -35,10 +35,12 @@ class JobService:
         logger: Any | None = None,
         *,
         max_pending: int = 64,
+        tool_audit_retention_days: int = 30,
     ) -> None:
         self.db = db
         self.logger = logger or get_logger("smartcut.jobs")
         self.max_pending = max(0, int(max_pending))
+        self.tool_audit_retention_days = max(0, int(tool_audit_retention_days))
         self.executor = ThreadPoolExecutor(
             max_workers=max(1, max_workers),
             thread_name_prefix="smartcut-job",
@@ -243,6 +245,50 @@ class JobService:
             time.sleep(0.05)
         return False
 
+    def has_active_jobs(self, project_id: str) -> bool:
+        with self._lock:
+            return any(
+                owner == project_id for owner in self._project_by_job.values()
+            )
+
+    def prune_project_cache(
+        self,
+        project_id: str,
+        cache: Any,
+        *,
+        max_bytes: int,
+        dry_run: bool = False,
+    ) -> dict:
+        """项目无活动任务时淘汰可重算缓存；有任务则整体跳过。"""
+        with self.project_guard(project_id):
+            if self.has_active_jobs(project_id):
+                return {
+                    "project_id": project_id,
+                    "pruned": 0,
+                    "freed_bytes": 0,
+                    "remaining_bytes": 0,
+                    "dry_run": dry_run,
+                    "skipped": True,
+                    "reason": "active_jobs",
+                }
+            result = cache.prune(
+                project_id,
+                max_bytes=max_bytes,
+                dry_run=dry_run,
+            )
+            return {**result, "skipped": False}
+
+    def purge_expired_tool_records(self) -> int:
+        """清理超过保留期的工具审计；retention<=0 表示永久保留。"""
+        if self.tool_audit_retention_days <= 0:
+            return 0
+        cutoff = utcnow() - timedelta(days=self.tool_audit_retention_days)
+        with self.db.session() as session:
+            result = session.execute(
+                delete(ToolCallRecord).where(ToolCallRecord.created_at < cutoff)
+            )
+            return int(result.rowcount or 0)
+
     def _delete_job(self, job_id: str) -> None:
         try:
             with self.db.session() as session:
@@ -299,6 +345,14 @@ class JobService:
             except Exception as exc:
                 self.logger.warning(
                     "tool_audit_flush_failed",
+                    job_id=job_id,
+                    error=str(exc),
+                )
+            try:
+                self.purge_expired_tool_records()
+            except Exception as exc:
+                self.logger.warning(
+                    "tool_audit_purge_failed",
                     job_id=job_id,
                     error=str(exc),
                 )

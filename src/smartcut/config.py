@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     # 0=不限制；默认 64 个活动/排队 Job，满则快速失败而不是无限堆积。
     max_pending_jobs: int = 64
     max_upload_mb: int = 4096
+    # 可重算缓存磁盘上限（MB）；0=不限制。segments/renders 等不可重算产物不计入。
+    cache_max_mb: int = Field(default=2048, ge=0)
+    # 工具审计保留天数；0=永久保留。任务 flush 时清理更早的记录。
+    tool_audit_retention_days: int = Field(default=30, ge=0)
 
     # 资源并发上限（跨 Job/Agent 共享）
     ffmpeg_concurrency: int = 2
@@ -108,6 +112,9 @@ class Settings(BaseSettings):
             if item.strip()
         }
 
+    # 无 Key 时用确定性规则规划器跑完整 DAG；关闭后恢复“仅分析”行为。
+    planner_offline_fallback: bool = True
+
     # Orchestrator（Magnetic-One 风格）
     orchestrator_max_parallel: int = 4
     orchestrator_max_rounds: int = 64
@@ -122,6 +129,22 @@ class Settings(BaseSettings):
     # GPU 解码：auto/off；失败自动回退 CPU
     hardware_decoding: str = "auto"
     decode_hwaccel: str = "cuda"
+
+    # 视觉证据层（ViewSynthesizer）：CPU 参考渲染为默认，GL 后续由桌面注入。
+    view_evidence_enabled: bool = True
+    view_renderer: str = "auto"  # auto：桌面注入 GL，server/CI 无 GL 时回退 CPU
+    view_max_images: int = Field(default=7, ge=1, le=64)
+    view_max_windows: int = Field(default=4, ge=1, le=32)
+    view_fps: float = Field(default=2.0, gt=0.0, le=30.0)
+    view_window_padding_seconds: float = Field(default=2.0, ge=0.0, le=30.0)
+    view_window_max_seconds: float = Field(default=8.0, gt=0.0, le=120.0)
+    view_tile_width: int = Field(default=384, ge=16, le=2048)
+    view_tile_height: int = Field(default=216, ge=16, le=2048)
+    view_grid_cols: int = Field(default=4, ge=1, le=8)
+    view_label_format: str = "T%02d"
+    view_policy_version: str = "views@1.0"
+    view_dedupe_hash_distance: int = Field(default=4, ge=0, le=32)
+    view_total_max_bytes: int = Field(default=12 * 1024 * 1024, ge=0)
 
     # 多模态视觉摘要（OpenAI 兼容 VLM；未配置则禁用）
     # remote=OpenAI 兼容；local=本地插件模块（可选 ONNX 后端）
@@ -146,6 +169,9 @@ class Settings(BaseSettings):
     # 文本优先：章节摘要足够长时不再发送关键帧，只用 contact sheet/文本规划。
     vision_text_first: bool = True
     vision_text_min_chars: int = 40
+    # M0.6：使用 VisualEvidence（带 Txx 标签）替代旧 contact sheet/keyframes。
+    # 开启后 VLM 输出必须引用真实标签；证据不可用时自动回退旧路径。
+    vision_use_evidence: bool = True
     # 同章节多关键帧拼成 2x2 tile，减少图片数量与 token。
     vision_chapter_tiles: bool = True
     # 摘要为空或 cautions 达到阈值时补一次复核请求。

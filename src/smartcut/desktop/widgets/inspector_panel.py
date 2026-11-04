@@ -50,6 +50,14 @@ class InspectorPanel(QWidget):
         revision_layout.addWidget(self.diff_browser)
         layout.addWidget(revision_group)
 
+        segment_group = QGroupBox("选中片段")
+        segment_layout = QVBoxLayout(segment_group)
+        self.segment_info = QTextBrowser()
+        self.segment_info.setMinimumHeight(80)
+        self.segment_info.setPlainText("在时间线中选择片段查看选段依据")
+        segment_layout.addWidget(self.segment_info)
+        layout.addWidget(segment_group)
+
         action_group = QGroupBox("编辑与导出")
         action_layout = QVBoxLayout(action_group)
         self.save_button = QPushButton("保存为新版本")
@@ -125,6 +133,32 @@ class InspectorPanel(QWidget):
     def current_revision(self) -> int | None:
         data = self.revision_combo.currentData()
         return int(data) if data is not None else None
+
+    def show_segment(self, segment: dict | None) -> None:
+        if not segment:
+            self.clear_segment()
+            return
+        start = segment.get("start")
+        end = segment.get("end")
+        confidence = segment.get("confidence")
+        lines = [
+            f"标签：{segment.get('tag') or '-'}",
+            (
+                f"源区间：{float(start):.3f}–{float(end):.3f}s"
+                if start is not None and end is not None
+                else "源区间：-"
+            ),
+            (
+                f"置信度：{float(confidence):.2f}"
+                if confidence is not None
+                else "置信度：-"
+            ),
+            f"依据：{segment.get('rationale') or '无'}",
+        ]
+        self.segment_info.setPlainText("\n".join(lines))
+
+    def clear_segment(self) -> None:
+        self.segment_info.setPlainText("在时间线中选择片段查看选段依据")
 
     def set_workspace(self, path: str) -> None:
         self.workspace_label.setText(path)

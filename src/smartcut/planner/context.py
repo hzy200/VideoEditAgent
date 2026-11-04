@@ -45,6 +45,7 @@ class DraftTrimOp(BaseModel):
     range: TimeRange
     tag: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    rationale: str | None = Field(default=None, max_length=30)
 
 
 class EditIRDraft(BaseModel):
@@ -252,11 +253,13 @@ def visual_notes_payload(notes: dict | None) -> dict | None:
                 "summary": item.get("summary") or "",
                 "visual_tags": item.get("visual_tags") or [],
                 "cautions": item.get("cautions") or [],
+                "evidence_refs": list(item.get("evidence_refs") or [])[:8],
             }
             for item in items[:60]
         ],
         "image_count": notes.get("image_count", 0),
         "model": notes.get("model"),
+        "evidence_ids": list(notes.get("evidence_ids") or [])[:8],
     }
 
 

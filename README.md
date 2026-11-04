@@ -13,6 +13,13 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
 - **Orchestrator 多智能体**：默认由 `workflow.json` 规则图驱动，LLM 只负责章节选择、
   规划、审片与可选总结；支持并行子智能体、动态任务、失败重试/跳过、最终决策答案。
   如需让 LLM 生成任务图，可在设置中显式开启实验选项。
+- **离线规则规划**：无 DeepSeek Key 时由确定性 `RulePlanner` 按 goal 时长、候选
+  score、章节/镜头边界与质量区间产出 EditIR，完整 DAG 仍可跑通；结果明确标注
+  `source=rule`，不冒充 AI 规划。可用 `SMARTCUT_PLANNER_OFFLINE_FALLBACK=false`
+  恢复“只分析”行为。
+- **选段质量评估**：`scripts/evaluate_selection.py` 对比人工 EDL 与规划区间，
+  输出 interval/segment IoU、覆盖率、重复率与时长偏差；CI 用 `-m eval` 跑规则
+  模式并设 F1 下限。
 - **每任务独立工作区**：文件复制到 `workspace/projects/{id}/`，源文件只读。
 - **本地媒体能力**：ffprobe、cut/concat、代理预览、转写（faster-whisper）。
 - **OpenCV 感知**：PySceneDetect 镜头切分、黑/静/糊/重复帧、人脸锚点、contact sheet。
@@ -33,8 +40,9 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   候选/VLM notes/阶段缓存键），按源哈希与章节增量缓存，Planner 只读压缩摘要。
 - **自适应感知**：一次 ffmpeg 同时输出分析帧与 contact-sheet 缩略图；
   按镜头切点/质量风险/话题变化/章节边界分配帧预算，并用感知哈希去重。
-- **VLM 成本优化**：文本优先、章节 2x2 tile、单图 sha256 补算、single-flight、
-  低置信度章节二次复核；未配置/失败自动 text-only。
+- **VLM 成本优化**：默认使用 top-K 视觉证据视图（Txx 标签），文本优先、
+  章节 2x2 tile、单图 sha256 补算、single-flight、低置信度章节二次复核；
+  未配置/失败自动 text-only，可用 `SMARTCUT_VISION_USE_EVIDENCE=false` 回退旧路径。
 - **硬件加速**：硬件编码 NVENC/QSV/AMF；GPU 解码（hwaccel）失败自动回退 CPU；
   OpenCV 长任务可选 spawn 进程池；whisper `device=auto` 懒检测 CUDA，
   GPU 强制单 worker。
@@ -43,8 +51,9 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
 - **模板与批量**：编辑模板（目标、phase、9:16/字幕/响度/去口癖）可复用；
   批量编排多个项目并汇总成功/失败与产物。
 - **Proxy-first 预览**：打开项目先播放 720p 代理，成片完成后再切换。
-- **多模态视觉摘要**：contact sheet + 章节 keyframes/tile 送入可配置 OpenAI
-  兼容 VLM，生成视觉 notes 注入文本 Planner；未配置或失败时自动降级。
+- **多模态视觉摘要**：视觉证据视图（或旧 contact sheet + 章节 keyframes/tile）
+  送入可配置 OpenAI 兼容 VLM，生成带 `evidence_refs` 的视觉 notes 注入 Planner；
+  未配置或失败时自动降级为文本规划。
 - **可选本地视觉**：`vision_provider=local` 通过外部插件模块调用本地 VLM
   或 ONNX 推理，主程序不打包/加载 torch；依赖或模型缺失时自动 text-only。
 - **AudioAgent**：按词级时间戳去口癖并提交修正 revision。
@@ -58,7 +67,8 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   抽帧/分析/丢弃帧数与阶段耗时；FTS top 内存排序 + 缓存；
   工具审计每 20 条批量写。
 - **性能基准**：`scripts/benchmark_long_video.py` 按阶段输出耗时、缓存命中、
-  分析 engine、转写 worker/设备，便于长视频回归对比。
+  分析 engine、转写 worker/设备；`scripts/benchmark_evidence_render.py`
+  对比 CPU/GL 证据渲染耗时（支持 `--kind` / `--assert-not-slower`）。
 - **GUI 直接编辑**：时间线拖拽移动/边缘裁剪、添加/删除/分割/排序、撤销/重做；
   选中片段循环预览；空格/左右逐帧/Delete/Ctrl+Z 快捷键。
 - **播放与监听**：QtMultimedia 视频/音频预览，播放/暂停/停止、音量滑杆、
@@ -80,6 +90,31 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   高对比度与界面缩放继续可用。
 - **GUI 可视化**：revision diff 高亮（新增/删除/未变）、候选片段搜索与一键加入、
   Agent 指标面板（队列/耗时/重试/缓存/token/编码器）。
+- **可解释选段**：时间线「依据」列与 Inspector 展示每段 rationale；候选 tooltip
+  显示 score/tags/质量/人脸/镜头边界。
+- **视觉证据层（M0）**：候选窗口按 2fps 抽帧并解析真实 PTS，生成带
+  `T01` 编号、`frame_no`/`pts`、render/semantic hash 的 `VisualEvidence`；
+  dHash 去重、top-K 图片/token 硬预算、CPU Pillow 参考渲染、原子目录缓存，
+  并在 run metrics 中记录 extract/measure/render 耗时与缓存命中。
+- **VLM/Planner 证据引用（M0.6）**：默认 VLM 输入优先使用证据视图
+  （`SMARTCUT_VISION_USE_EVIDENCE=false` 可回退旧 contact sheet），prompt 插入
+  `[Txx|秒]` 证据时间线与转写文本；`evidence_refs` 只能引用真实标签，未知标签
+  直接拒绝；Planner rationale 同样校验 `Txx`，避免引用不存在的帧编号。
+- **Qt OpenGL 证据渲染（M1）**：桌面使用每线程离屏 QOpenGLContext/FBO +
+  QOpenGLPaintDevice 合成 tile/编号/bbox；`render_hash` 不含 backend，CPU/GL
+  用 `semantic_hash` 容差比对；无 GL/RDP/驱动异常自动回退 Pillow，并记录
+  `backend=cpu`。`--self-check` 包含 64×64 离屏渲染与 CPU 语义比对。
+- **更多证据视图（M2）**：帧差/光流双通道、flow_x/flow_y 条带、bbox 叠层、
+  ROI 回原素材高分辨率裁切、ffmpeg `codecview` 残差可视化；按 CPU/GL 分档
+  限制图片与 tile 尺寸；“视觉证据”面板展示缩略图、Txx 时间码并可点击定位；
+  时间线只读叠层显示证据点、静音区与候选窗口。
+- **反馈闭环**：保存 revision 时把被删除片段写入 `segment_reject`，偏好统计
+  排除被拒标签；「我的偏好」面板显示样本数/中位片段/保留率/top tags 与
+  「按我的节奏规划」开关。
+- **4 工作区 + 场景预设**：剪辑 / 素材与感知 / 包装 / 运行与诊断；内置
+  口播切片、访谈精华、课程章节 3 个 `EditTemplate` 预设。
+- **平台导出预设**：reels/douyin 1080x1920、youtube 1920x1080，可写入
+  EditIR 或导出对话框；copy 模式会明确拒绝需要裁切的预设。
 - **长视频时间线**：滚轮缩放、Shift+滚轮/中键平移、标尺、波形、缩略图轨、
   可见范围裁剪；关键帧/contact sheet 异步加载缓存。
 - **字幕与大纲**：章节摘要/转写上下文、字幕叠加预览与字号/颜色/位置；
@@ -103,6 +138,9 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   独立转码支持 autorotate/keep_10bit/tonemap。
 - **音频/字幕增强**：BGM sidechain ducking、两遍 loudnorm、ASS/fontsdir、软字幕封装。
 - **可选服务端**：FastAPI 仍保留为 optional extra，便于 Web/自动化，不进入桌面包。
+- **工程门禁**：GitHub Actions（Windows + Python 3.12 + ffmpeg）跑 pytest、
+  `check_drift.py`、规则选段 `-m eval` 与桌面 smoke；`schema_meta` v1→v4
+  迁移、旧库幂等测试、缓存 prune、日志轮转、工具审计保留期与文档路径守卫。
 
 ## 开发态运行
 
@@ -180,6 +218,14 @@ python scripts/benchmark_long_video.py --src D:\video.mp4 \
 输出 JSON 包含每阶段耗时、缓存命中、质量/人脸 engine、解码器、
 转写 worker 与设备。
 
+证据渲染基准：
+
+```bash
+# 需要桌面/Qt 环境；无 GL 时自动记录 backend=cpu
+python scripts/benchmark_evidence_render.py --tiles 9 --repeat 3 \
+  --kind temporal_diff --assert-not-slower
+```
+
 ## 打包 Windows exe
 
 ```powershell
@@ -217,7 +263,7 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
 | ffmpeg / ffprobe | `vendor/ffmpeg/win64/` → `bin/` | 不依赖系统 PATH |
 | faster-whisper 模型 | `vendor/whisper/base/` → `models/whisper/base` | 默认 base，可改 tiny/small |
 | OpenCV / PySceneDetect | PyInstaller 自动收集 | 含 Haar cascade 与人脸检测 |
-| PySide6 / Qt | PyInstaller 自动收集 | 含 QtMultimedia |
+| PySide6 / Qt | PyInstaller 自动收集 | 含 QtMultimedia / QtOpenGL（证据渲染） |
 | 应用数据 | `%LOCALAPPDATA%\SmartCut\` | DB、workspace、logs |
 | DeepSeek Key | Windows Credential Manager | 不写明文配置 |
 | 策略文件 | `src/smartcut/policies/` → `_internal/smartcut/policies/` | agents/tools/encoding/vision/workflow |
@@ -238,11 +284,13 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
 5. 打开项目优先播放 720p 代理；渲染完成后自动切换到成片。
 6. 点击“审片当前成片”检查时长/音轨/比例/字幕/黑帧模糊；配置 VLM 时
    额外做关键帧复核，只输出问题列表，不修改 IR。
-7. 查看最终答案、任务账本、感知标签页、contact sheet 与章节关键帧；最新 revision 自动加载。
+7. 查看最终答案、任务账本、感知/视觉证据页、contact sheet 与章节关键帧；
+   “视觉证据”可选择帧差/光流/bbox/ROI/codec 残差并点击定位；最新 revision 自动加载。
 8. 在“版本与片段”中改起止秒数 → 保存为新版本 → dry-run → 渲染；
    可通过 revision diff 查看新增/删除/未变片段。
-9. 配置 VLM 后，规划会自动使用 contact sheet + 章节关键帧/tile 的视觉摘要；
-   未配置或调用失败时完全回退文本规划。
+9. 配置 VLM 后，规划默认使用证据视图与 `Txx` 证据时间线；VLM/Planner 只能
+   引用真实标签。未配置或调用失败时完全回退文本规划；
+   `SMARTCUT_VISION_USE_EVIDENCE=false` 可回退旧 contact sheet/keyframes。
 10. 需要竖版/字幕/响度时，勾选 AI 面板选项；渲染产出 9:16 视频与 SRT/VTT。
 11. 运行中可取消；失败/取消后可“缓存辅助续跑”，已完成的分块/感知/LLM 结果会复用。
 12. 模板与批量编排可通过可选服务端 API 使用（见下文）。
@@ -261,6 +309,7 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
         ├── media\               # 用户素材副本
         ├── cache\               # 内容寻址缓存：frames/scenes/quality/faces/
         │                        # chapters/candidates/manifest/vision_notes/
+        │                        # evidence（view.png + evidence.json）/
         │                        # transcripts/audio_chunks/segments/proxy/llm/
         │                        # review_frames/review_sheet
         ├── renders\r{n}\        # 成片 + captions.srt/vtt
@@ -279,7 +328,16 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
 - 硬件编码由 `SMARTCUT_HARDWARE_ENCODING=auto|off` 控制；失败自动回退 libx264，
   Segment 缓存键包含编码器参数。
 - 视觉摘要默认关闭；配置 `SMARTCUT_VISION_BASE_URL/MODEL` 与 `VISION_API_KEY`
-  后才会发送缩放后的 contact sheet/keyframes，失败自动回退文本规划。
+  后才会发送缩放后的证据视图/contact sheet/keyframes，失败自动回退文本规划。
+- 视觉证据：`SMARTCUT_VIEW_EVIDENCE_ENABLED`、`SMARTCUT_VIEW_MAX_IMAGES`、
+  `SMARTCUT_VIEW_MAX_WINDOWS`、`SMARTCUT_VIEW_FPS`、`SMARTCUT_VIEW_TILE_*`、
+  `SMARTCUT_VIEW_RENDERER=auto|cpu`、`SMARTCUT_VISION_USE_EVIDENCE`；
+  缓存键含 source_hash + policy_version + 渲染常量，`evidence.json` 记录
+  `render_hash`/`semantic_hash`/backend。
+- 缓存与日志：`SMARTCUT_CACHE_MAX_MB` 只淘汰可重算 kind（frames/scenes/
+  quality/faces/contactsheet/llm/vision/transcript/audio_chunks/evidence），
+  segments/renders/manifest/result 永不淘汰；日志 10MB×3 轮转；
+  `SMARTCUT_TOOL_AUDIT_RETENTION_DAYS` 清理过期工具审计。
 - `src/smartcut/policies/*.json` 是 agent/tool/encoder/vision/workflow 的机器可读约束；
   `python scripts/check_drift.py` 会检查代码与策略是否一致。
 - 仅 DeepSeek HTTPS 走网络；faster-whisper 使用本地模型目录。
@@ -303,6 +361,8 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
 - 本地视觉：`SMARTCUT_VISION_PROVIDER=local`、
   `SMARTCUT_LOCAL_VISION_MODULE`、`SMARTCUT_LOCAL_VISION_BACKEND=module|onnx`、
   `SMARTCUT_LOCAL_VISION_MODEL_PATH`。
+- 规划兜底：`SMARTCUT_PLANNER_OFFLINE_FALLBACK`（默认 true；关闭后无 Key 只分析）。
+- 偏好作用域：`SMARTCUT_PREFERENCE_SCOPE=source|project`（桌面「我的偏好」开关同步）。
 - 候选与 Critic：`SMARTCUT_CANDIDATE_TARGET_SECONDS`（默认 30）、
   `SMARTCUT_CANDIDATE_MAX`（300）、`SMARTCUT_CANDIDATE_RETRIEVAL_LIMIT`（60）、
   `SMARTCUT_CRITIC_MAX_SEGMENT_SECONDS`（90）、
@@ -326,7 +386,7 @@ conda activate video_edit
 python -m pytest -q
 ```
 
-当前结果：**272 collected，270 passed + 2 skipped（live）**。
+当前结果：**527 collected，519 passed + 8 skipped（live/CI 专项/本地模型/无 GL）**。
 默认测试不访问网络：契约、golden、ffmpeg 工具链、代理生成、
 OpenCV 镜头/质量/人脸/contact sheet、9:16、字幕映射与烧录、响度实测、
 内容寻址缓存、分块转写、章节化、候选片段与 FTS5 检索、Critic 局部重规划、
@@ -346,6 +406,29 @@ VLM 文本优先/tile/二次复核/single-flight、VideoManifest 增量合并与
 章节增量分析、快速大纲、公平资源池、进程池、GPU 解码回退、
 转写 GPU 策略、性能基准、成片审片、音频优先、模板/批量、
 本地视觉插件。
+
+P0–M2 新增回归覆盖：
+
+- 工程门禁：CI 环境二进制守卫、schema_meta 迁移与旧库幂等、缓存 prune、
+  日志轮转、工具审计清理、文档路径守卫；
+- 离线规划：RulePlanner 目标时长/质量剔除/边界吸附、HybridPlanner 回退、
+  无变化 replan、EDL IoU/F1 门禁；
+- P2：rationale 契约与 GUI 展示、`segment_reject` 偏好排除、
+  4 工作区/场景预设、reels/douyin/youtube 画幅预设；
+- 视觉证据：VisualEvidence 契约/hash、PTS 抽帧、top-K 预算、CPU 证据缓存、
+  VLM/Planner `evidence_refs` 校验、QtGL/CPU 语义与性能、M2 多视图、
+  EvidencePanel 与时间线只读叠层。
+
+CI（`.github/workflows/ci.yml`）在 windows-latest 安装
+`.[dev,desktop,transcribe,vision,server]`（`vision` 是测试收集期必需）并执行：
+
+```bash
+python -m pytest -q
+python -m pytest -q -m eval
+python scripts/check_drift.py
+python -m smartcut.desktop.app --smoke-test --data-dir "$env:TEMP\smartcut-smoke"
+```
+
 真实 DeepSeek 联调默认跳过：
 
 ```bash
@@ -356,22 +439,28 @@ SMARTCUT_LIVE_DEEPSEEK=1 python -m pytest -q -m live
 
 ```
 src/smartcut/
-  contracts/      # RationalTime / MediaFacts / EditIR / Manifest / Template / ToolCall
+  contracts/      # RationalTime / MediaFacts / EditIR / Manifest / Template /
+                  # ToolCall / visual_evidence / export_presets
   perception/     # ffprobe、转写、感知、候选、manifest、进程池
+    view/         # VisualEvidence 选择/测量/hash/CPU 渲染/多视图/预算
   llm/            # DeepSeek/Vision 客户端、single-flight、本地视觉适配器
-  planner/        # EditIR 规划（章节 + 候选 + 视觉上下文）
+  planner/        # DeepSeek/Hybrid/Rule Planner、视觉上下文、EDL 评估
   compiler/       # 纯函数 lowering、字幕/包装、编码参数、IR diff
-  runner/         # 沙箱、ffmpeg 工具、编码/解码探测、ffprobe 校验
+  runner/         # 沙箱、ffmpeg 工具（含 extract_evidence_frames）、探测/校验
   orchestrator/   # 任务图、子智能体、Critic、大纲/快速大纲/音频优先
   policies/       # agents/tools/encoding/vision/workflow JSON 约束
   desktop/        # PySide6 GUI、大纲确认、审片入口、控制器、资源路径
+    view/         # Qt OpenGL 离屏证据渲染器
   server/         # 可选 FastAPI、缓存、FTS5、模板、批量、大纲快照
+    services/     # 业务编排 + 证据服务/缓存/metrics
   benchmark.py    # 长视频阶段性能基准
 docs/             # 需求/可行性 + INVARIANTS/AGENT_PROTOCOL/MEDIA_PIPELINE/
                   # VISION/PHASE3/PERFORMANCE/GUI/OPTIMIZATION_PLAN
-scripts/          # prepare_vendor / smoke_desktop / check_drift / benchmark_long_video
+scripts/          # prepare_vendor / smoke_desktop / check_drift /
+                  # benchmark_long_video / evaluate_selection /
+                  # benchmark_evidence_render
 packaging/        # PyInstaller spec / Windows 构建脚本
-tests/            # 核心 + 桌面 + live
+tests/            # 核心 + 桌面 + live + eval + evidence/GL
 ```
 
 ## 许可与注意
@@ -380,6 +469,7 @@ tests/            # 核心 + 桌面 + live
 - H.264 编码涉及专利许可；内部使用风险较低，商用需评估。
 - PySide6 为 LGPL；请保留相应许可与动态链接方式。
 - 首次构建需联网下载 PySide6/faster-whisper 与 base 模型；之后完全离线运行。
-- 当前时间线支持片段拖拽/裁剪/排序、音频 lane 与多轨混音；
-  视频转场、变速/关键帧动画、OTIO/FCPXML 交换、WebSocket 推送仍为后续
-  里程碑。可选服务端已提供仅轮询数据库的 SSE 事件流，桌面端仍使用 Qt 信号。
+- 当前时间线支持片段拖拽/裁剪/排序、音频 lane 与多轨混音，并已落地
+  视频转场、变速（走时长模型与 `compose`）、图片/文字水印与手动 delogo。
+  真正尚未实现的是 OTIO/FCPXML 交换、关键帧动画与 WebSocket 推送；
+  可选服务端已提供仅轮询数据库的 SSE 事件流，桌面端仍使用 Qt 信号。

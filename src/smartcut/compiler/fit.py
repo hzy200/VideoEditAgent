@@ -34,17 +34,22 @@ def compute_fit_crop(
     faces: FaceReport | None = None,
     *,
     use_faces: bool = True,
+    target_width: int = TARGET_WIDTH,
+    target_height: int = TARGET_HEIGHT,
 ) -> FitCrop:
     if source_width <= 0 or source_height <= 0:
         raise ValueError("源尺寸必须为正")
+    if target_width <= 0 or target_height <= 0:
+        raise ValueError("目标尺寸必须为正")
 
+    target_ratio = target_width / target_height
     source_ratio = source_width / source_height
-    if source_ratio > TARGET_RATIO:
+    if source_ratio > target_ratio:
         crop_height = source_height
-        crop_width = int(round(crop_height * TARGET_RATIO))
+        crop_width = int(round(crop_height * target_ratio))
     else:
         crop_width = source_width
-        crop_height = int(round(crop_width / TARGET_RATIO))
+        crop_height = int(round(crop_width / target_ratio))
 
     crop_width = max(2, _even(min(crop_width, source_width)))
     crop_height = max(2, _even(min(crop_height, source_height)))
@@ -67,4 +72,6 @@ def compute_fit_crop(
         crop_y=y,
         crop_width=crop_width,
         crop_height=crop_height,
+        target_width=target_width,
+        target_height=target_height,
     )

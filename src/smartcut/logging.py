@@ -4,16 +4,34 @@ from __future__ import annotations
 
 import logging
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import structlog
 
+LOG_MAX_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
 
-def configure_logging(log_file: Path | None = None, level: int = logging.INFO) -> None:
+
+def configure_logging(
+    log_file: Path | None = None,
+    level: int = logging.INFO,
+    *,
+    max_bytes: int = LOG_MAX_BYTES,
+    backup_count: int = LOG_BACKUP_COUNT,
+) -> None:
     handlers: list[logging.Handler] = []
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        # 长任务会持续追加 JSONL；轮转避免单个日志无限增长占满磁盘。
+        handlers.append(
+            RotatingFileHandler(
+                log_file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+        )
     else:
         handlers.append(logging.StreamHandler(sys.stderr))
 

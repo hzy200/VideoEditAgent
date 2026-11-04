@@ -45,6 +45,8 @@ separation = ["demucs==4.1.0"]
 packaging = ["pyinstaller>=6.10"]
 dev = [
     "pytest>=8.2",
+    "pytest-xdist>=3.6",
+    "pytest-timeout>=2.3",
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",
@@ -67,7 +69,10 @@ testpaths = ["tests"]
 # samples/ 真实素材测试较慢，默认不进入快速回归；显式运行 -m samples。
 addopts = "-q -m 'not samples'"
 filterwarnings = ["ignore::DeprecationWarning"]
+# pytest-timeout：单个测试超过 10 分钟视为挂起，CI 直接失败。
+timeout = 600
 markers = [
     "live: 需要真实外部 API（DeepSeek）的联调测试",
     "samples: 使用 samples/ 真实素材的集成测试（较慢）",
+    "eval: 规则选段质量评估（CI 必跑，设 F1 下限）",
 ]

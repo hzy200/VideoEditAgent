@@ -1,6 +1,7 @@
 # SmartCut 工作流与性能优化计划
 
-- 状态：P0/P1/P2/P3 已完成（2026-11-02）
+- 状态：P0/P1/P2/P3 已完成（2026-11-02）；后续视觉证据层见 `docs/VISION.md`，
+  最新测试基线以 README 为准（527 collected / 519 passed + 8 skipped）
 - 日期：2026-11-02
 - 范围：视频理解、抽帧与 VLM、结构化元数据、并行/GPU、测试与回归
 - 关联文档：`docs/PERFORMANCE.md`、`docs/VISION.md`、`docs/MEDIA_PIPELINE.md`
@@ -17,7 +18,8 @@
 - Planner / Critic / AudioAgent / SemanticQAAgent；
 - 两阶段大纲、硬件编码、Proxy-first；
 - 多轨音频与 Demucs 伴生 worker（CUDA 已验证）；
-- 232 项全量测试（230 passed + 2 skipped），live 2 passed。
+- 本轮历史基线：232 项全量测试（230 passed + 2 skipped），live 2 passed；
+  当前全量测试见 README（527 collected / 519 passed + 8 skipped）。
 
 但长视频、复杂画面和多模态调用仍存在成本和耗时压力，主要来自：
 
@@ -48,7 +50,8 @@
 
 ### 3.1 当前基线
 
-- 默认测试：**232 collected，230 passed + 2 skipped（live）**
+- 本轮历史默认测试：**232 collected，230 passed + 2 skipped（live）**；
+  当前基线：**527 collected，519 passed + 8 skipped**
 - live DeepSeek：**2 passed**
 - `scripts/check_drift.py`：通过
 - 开发态 `--smoke-test`：退出 0
@@ -105,7 +108,7 @@ VideoManifest
 
 - `contracts/manifest.py`：`VideoManifest` + 版本字段；
 - `perception/manifest.py`：组装、校验、增量合并；
-- `services.py`：`build_video_manifest(project_id)` 与缓存；
+- `server/services/facade.py`：`build_video_manifest(project_id)` 与缓存；
 - 落盘为 `perception/manifest.json` 或 artifact 表记录。
 
 设计原则：
@@ -382,7 +385,7 @@ src/smartcut/perception/manifest.py         # 新
 src/smartcut/planner/vision.py
 src/smartcut/orchestrator/agents/*.py
 src/smartcut/orchestrator/planner.py
-src/smartcut/server/services.py
+src/smartcut/server/services/
 src/smartcut/runner/tools/frames.py
 src/smartcut/resources.py
 src/smartcut/policies/workflow.json

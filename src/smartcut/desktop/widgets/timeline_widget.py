@@ -29,6 +29,7 @@ class TimelineWidget(QWidget):
         self.segments: list[dict] = []
         self.shots: list[dict] = []
         self.quality_marks: list[dict] = []
+        self.evidence: list[dict] = []
         self.position = 0.0
         self.zoom = 1.0
         self.view_start = 0.0
@@ -94,6 +95,10 @@ class TimelineWidget(QWidget):
     def set_overlays(self, shots: list[dict], quality_marks: list[dict]) -> None:
         self.shots = shots
         self.quality_marks = quality_marks
+        self.update()
+
+    def set_evidence(self, items: list[dict] | None) -> None:
+        self.evidence = list(items or [])
         self.update()
 
     def set_thumbnails(self, thumbnails: list[tuple[float, QPixmap]]) -> None:
@@ -245,6 +250,7 @@ class TimelineWidget(QWidget):
 
         ruler, thumbs, wave, audio, segments = self._lanes_full()
         self._paint_ruler(painter, ruler)
+        self._paint_evidence(painter, ruler)
         self._paint_thumbnails(painter, thumbs)
         self._paint_waveform(painter, wave)
         self._paint_audio(painter, audio)
@@ -279,6 +285,43 @@ class TimelineWidget(QWidget):
                 _format_time(value, interval),
             )
             value += interval
+
+    def _paint_evidence(self, painter: QPainter, lane: QRectF) -> None:
+        if not self.evidence or self.duration <= 0:
+            return
+        colors = {
+            "tile": QColor("#38bdf8"),
+            "silence": QColor("#f59e0b"),
+            "candidate": QColor("#a78bfa"),
+        }
+        font = QFont()
+        font.setPointSize(7)
+        painter.setFont(font)
+        for item in self.evidence:
+            try:
+                start = float(item.get("start"))
+                end = float(item.get("end"))
+            except (TypeError, ValueError):
+                continue
+            if end <= self.view_start or start >= self.view_end:
+                continue
+            x1 = self._time_to_x(start, lane)
+            x2 = self._time_to_x(end, lane)
+            if x2 - x1 < 1.0:
+                x2 = x1 + 1.0
+            kind = str(item.get("kind") or "tile")
+            painter.fillRect(
+                QRectF(x1, lane.top() + 2, max(1.0, x2 - x1), 3),
+                colors.get(kind, colors["tile"]),
+            )
+            label = str(item.get("label") or "")
+            if label and kind == "tile" and x2 - x1 > 18:
+                painter.setPen(colors.get(kind, colors["tile"]))
+                painter.drawText(
+                    QRectF(x1 + 1, lane.top() + 6, 40, 12),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    label,
+                )
 
     def _paint_thumbnails(self, painter: QPainter, lane: QRectF) -> None:
         painter.setPen(Qt.PenStyle.NoPen)

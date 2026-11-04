@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -38,6 +39,7 @@ def create_app(
     *,
     transcriber: Transcriber | None = None,
     planner: DeepSeekPlanner | None = None,
+    view_renderer: Any | None = None,
 ) -> FastAPI:
     settings = settings or load_settings()
     settings.ensure_dirs()
@@ -51,6 +53,7 @@ def create_app(
         settings.max_workers,
         logger,
         max_pending=settings.max_pending_jobs,
+        tool_audit_retention_days=settings.tool_audit_retention_days,
     )
     services = Services(
         settings,
@@ -59,6 +62,7 @@ def create_app(
         logger=logger,
         transcriber=transcriber,
         planner=planner,
+        view_renderer=view_renderer,
     )
 
     @asynccontextmanager

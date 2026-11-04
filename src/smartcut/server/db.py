@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +12,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -19,7 +20,10 @@ from sqlalchemy import (
     create_engine,
     event,
 )
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+SCHEMA_VERSION = 4
 
 
 def utcnow() -> datetime:
@@ -96,7 +100,15 @@ class Artifact(Base):
     """内容寻址缓存索引：cache_key -> 工作区文件/目录。"""
 
     __tablename__ = "artifacts"
-    __table_args__ = (UniqueConstraint("project_id", "kind", "cache_key"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "kind", "cache_key"),
+        Index(
+            "ix_artifacts_project_kind_updated",
+            "project_id",
+            "kind",
+            "updated_at",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[str] = mapped_column(String(64), index=True)
@@ -212,6 +224,69 @@ class ToolCallRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+def _table_columns(conn: Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+
+
+def _add_column(conn: Connection, table: str, column: str, ddl: str) -> None:
+    if column in _table_columns(conn, table):
+        return
+    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+
+def _migration_v1(conn: Connection) -> None:
+    _add_column(
+        conn,
+        "orchestration_runs",
+        "phase",
+        "phase VARCHAR(16) NOT NULL DEFAULT 'plan'",
+    )
+    _add_column(
+        conn,
+        "orchestration_runs",
+        "approved_outline_id",
+        "approved_outline_id VARCHAR(64)",
+    )
+
+
+def _migration_v2(conn: Connection) -> None:
+    _add_column(conn, "orchestration_runs", "metrics_json", "metrics_json TEXT")
+    _add_column(
+        conn,
+        "orchestration_runs",
+        "pinned_effects_json",
+        "pinned_effects_json TEXT",
+    )
+
+
+def _migration_v3(conn: Connection) -> None:
+    _add_column(conn, "media_assets", "source_hash", "source_hash VARCHAR(64)")
+
+
+def _migration_v4(conn: Connection) -> None:
+    _add_column(conn, "edit_feedback", "source_hash", "source_hash VARCHAR(64)")
+
+
+def _ensure_indexes(conn: Connection) -> None:
+    # create_all 不会为已存在的旧表补索引；每次 init 幂等补齐。
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_edit_feedback_source_hash "
+        "ON edit_feedback (source_hash)"
+    )
+    conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_artifacts_project_kind_updated "
+        "ON artifacts (project_id, kind, updated_at)"
+    )
+
+
+MIGRATIONS: tuple[tuple[int, Callable[[Connection], None]], ...] = (
+    (1, _migration_v1),
+    (2, _migration_v2),
+    (3, _migration_v3),
+    (4, _migration_v4),
+)
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -236,53 +311,42 @@ class Database:
         self._migrate()
 
     def _migrate(self) -> None:
-        """只做增量迁移：旧库补列，新表由 create_all 创建。"""
+        """版本化增量迁移：旧库按 v1→v4 补列，新表由 create_all 创建。
+
+        版本记录在 ``schema_meta``；每一步与版本更新在同一个事务内提交，
+        迁移中途失败时不会留下“版本已升级但列未补齐”的半成品。
+        """
         with self.engine.begin() as conn:
-            columns = {
-                row[1]
-                for row in conn.exec_driver_sql("PRAGMA table_info(orchestration_runs)")
-            }
-            if "phase" not in columns:
+            conn.exec_driver_sql(
+                "CREATE TABLE IF NOT EXISTS schema_meta ("
+                "key VARCHAR(64) PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            row = conn.exec_driver_sql(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            current = int(row[0]) if row is not None else 0
+            for version, step in MIGRATIONS:
+                if version <= current:
+                    continue
+                step(conn)
                 conn.exec_driver_sql(
-                    "ALTER TABLE orchestration_runs "
-                    "ADD COLUMN phase VARCHAR(16) NOT NULL DEFAULT 'plan'"
+                    "DELETE FROM schema_meta WHERE key = 'schema_version'"
                 )
-            if "approved_outline_id" not in columns:
                 conn.exec_driver_sql(
-                    "ALTER TABLE orchestration_runs "
-                    "ADD COLUMN approved_outline_id VARCHAR(64)"
+                    "INSERT INTO schema_meta(key, value) "
+                    "VALUES('schema_version', ?)",
+                    (str(version),),
                 )
-            if "metrics_json" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE orchestration_runs ADD COLUMN metrics_json TEXT"
-                )
-            if "pinned_effects_json" not in columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE orchestration_runs "
-                    "ADD COLUMN pinned_effects_json TEXT"
-                )
-            asset_columns = {
-                row[1]
-                for row in conn.exec_driver_sql("PRAGMA table_info(media_assets)")
-            }
-            if "source_hash" not in asset_columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE media_assets ADD COLUMN source_hash VARCHAR(64)"
-                )
-            feedback_columns = {
-                row[1]
-                for row in conn.exec_driver_sql("PRAGMA table_info(edit_feedback)")
-            }
-            if feedback_columns and "source_hash" not in feedback_columns:
-                conn.exec_driver_sql(
-                    "ALTER TABLE edit_feedback ADD COLUMN source_hash VARCHAR(64)"
-                )
-            if feedback_columns:
-                # create_all 不会为已存在的旧表补索引，这里显式幂等补齐。
-                conn.exec_driver_sql(
-                    "CREATE INDEX IF NOT EXISTS ix_edit_feedback_source_hash "
-                    "ON edit_feedback (source_hash)"
-                )
+            # 索引修复每次 init 都幂等执行：create_all 不会给旧表补索引，
+            # 已升级到最新版本的旧库也可能缺少后来新增的索引。
+            _ensure_indexes(conn)
+
+    def schema_version(self) -> int:
+        with self.engine.connect() as conn:
+            row = conn.exec_driver_sql(
+                "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
 
     @contextmanager
     def session(self) -> Iterator[Session]:

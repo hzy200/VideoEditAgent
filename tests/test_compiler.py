@@ -146,9 +146,31 @@ def test_out_of_bounds_rejected() -> None:
         lower(make_ir([trim("0.5", "11")]))
 
 
-def test_platform_preset_rejected() -> None:
+def test_platform_presets_lower_to_target_size() -> None:
+    reels = lower(
+        make_ir([trim("0.5", "1.5")], export=ExportSpec(preset="reels"))
+    )
+    reels_post = [
+        call for call in reels.tool_calls if call.tool == "postprocess"
+    ][0]
+    assert (reels.width, reels.height) == (1080, 1920)
+    assert reels_post.args["target_width"] == 1080
+    assert reels_post.args["target_height"] == 1920
+
+    youtube = lower(
+        make_ir([trim("0.5", "1.5")], export=ExportSpec(preset="youtube"))
+    )
+    assert (youtube.width, youtube.height) == (1920, 1080)
+
+
+def test_platform_preset_requires_reencode() -> None:
     with pytest.raises(UnsupportedFeature):
-        lower(make_ir([trim("0.5", "1.5")], export=ExportSpec(preset="reels")))
+        lower(
+            make_ir(
+                [trim("0.5", "1.5")],
+                export=ExportSpec(preset="reels", cut_mode="copy"),
+            )
+        )
 
 
 def test_loudness_is_lowered() -> None:

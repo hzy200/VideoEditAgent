@@ -79,6 +79,7 @@ from smartcut.perception import scenes as scenes_mod
 from smartcut.perception.transcribe import Transcriber, build_transcriber
 from smartcut.planner.client import DeepSeekPlanner
 from smartcut.planner.context import filter_transcript_to_chapters
+from smartcut.planner.hybrid import HybridPlanner
 from smartcut.planner.vision import (
     VisionImage,
     build_image_note_messages,
@@ -143,10 +144,12 @@ class ServiceBase:
         logger: Any | None = None,
         transcriber: Transcriber | None = None,
         planner: DeepSeekPlanner | None = None,
+        view_renderer: Any | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
         self.jobs = jobs
+        self.view_renderer = view_renderer
         self.logger = logger or get_logger("smartcut.services")
         self.workspaces = WorkspaceManager(settings.workspace_root)
         self.resources = ResourceManager(settings)
@@ -173,21 +176,27 @@ class ServiceBase:
         self._visual_backfill_lock = threading.RLock()
         self._vision_flights = SingleFlight()
         self._vision_metrics = threading.local()
+        self._evidence_metrics = threading.local()
         self.vision = build_vision_client(
             settings,
             cache=ArtifactLLMCache(self.cache),
             resources=self.resources,
         )
         self.transcriber = transcriber or build_transcriber(settings)
-        self.planner = (
-            planner
-            if planner is not None
-            else DeepSeekPlanner(
+        if planner is not None:
+            self.planner = planner
+        elif settings.planner_offline_fallback:
+            self.planner = HybridPlanner(
                 settings,
                 cache=ArtifactLLMCache(self.cache),
                 resources=self.resources,
             )
-        )
+        else:
+            self.planner = DeepSeekPlanner(
+                settings,
+                cache=ArtifactLLMCache(self.cache),
+                resources=self.resources,
+            )
         self.orchestrator = build_orchestrator(
             self,
             settings,
@@ -261,6 +270,14 @@ class ServiceBase:
     @property
     def planner_available(self) -> bool:
         return bool(getattr(self.planner, "available", False))
+
+    @property
+    def planner_llm_available(self) -> bool:
+        """当前 Planner 是否真的会调用 LLM；用于标注 source=llm/rule。"""
+        value = getattr(self.planner, "llm_available", None)
+        if value is None:
+            return self.planner_available
+        return bool(value)
 
     @staticmethod
     def _empty_llm_usage() -> dict[str, int]:

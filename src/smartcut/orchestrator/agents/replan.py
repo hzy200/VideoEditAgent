@@ -116,6 +116,24 @@ class ReplanAgent:
                 confidence=0.4,
             )
 
+        source = str(result.get("source") or "llm")
+        if not result.get("changed", True):
+            return AgentResult(
+                summary=(
+                    "重规划未产生变化，保留原 revision "
+                    f"{revision}（{source}）"
+                ),
+                output={
+                    "changed": False,
+                    "reason": "unchanged",
+                    "previous_revision": revision,
+                    "revision": revision,
+                    "issue_count": len(issues),
+                    "score": score,
+                    "source": source,
+                },
+                confidence=0.6,
+            )
         new_revision = int(result["revision"])
         ir = EditIR.model_validate(result["ir"])
         ctx.set_plan(new_revision, ir)
@@ -131,8 +149,9 @@ class ReplanAgent:
                 "issue_count": len(issues),
                 "score": score,
                 "segments": len(ir.sequence),
+                "source": source,
                 "effects_source": (
-                    "pinned" if ctx.pinned_effects is not None else "llm"
+                    "pinned" if ctx.pinned_effects is not None else source
                 ),
                 "pinned_effect_count": len(ctx.pinned_effects or []),
                 "usage": result.get("usage") or {},
