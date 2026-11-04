@@ -45,9 +45,13 @@ def app():
 @pytest.fixture(autouse=True)
 def _cleanup_gui(app):
     yield
+    app.processEvents()
+    # GitHub Windows runner 上对 Qt 对象强制 GC 后再次 processEvents 会触发
+    # access violation；CI 交给进程退出清理，conftest 已用 os._exit 收尾。
+    if os.environ.get("SMARTCUT_CI") == "1":
+        return
     import gc
 
-    app.processEvents()
     gc.collect()
     app.processEvents()
 
@@ -55,10 +59,12 @@ def _cleanup_gui(app):
 @pytest.fixture(scope="module", autouse=True)
 def _teardown_qt(app):
     yield
-    import gc
-
     app.closeAllWindows()
     app.processEvents()
+    if os.environ.get("SMARTCUT_CI") == "1":
+        return
+    import gc
+
     gc.collect()
     app.processEvents()
 

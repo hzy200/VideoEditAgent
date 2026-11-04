@@ -12,6 +12,8 @@ jobs:
     env:
       SMARTCUT_CI: "1"
       PYTHONUTF8: "1"
+      # GitHub Windows runner 无交互桌面；offscreen 比 minimal 更稳定。
+      QT_QPA_PLATFORM: "offscreen"
     steps:
       - uses: actions/checkout@v4
 
