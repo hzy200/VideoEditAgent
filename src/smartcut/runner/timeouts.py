@@ -29,6 +29,8 @@ _SCALED_TOOLS = {
     "proxy": 2.0,
     "transcode": 3.0,
     "media_repair": 3.0,
+    "pip_overlay": 3.0,
+    "timeline_compose": 3.0,
     "loudnorm_measure": 0.5,
 }
 

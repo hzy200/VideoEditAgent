@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from copy import deepcopy
 
@@ -9,7 +10,11 @@ from PySide6.QtCore import QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
+from smartcut.contracts.timeline_ops import TRANSITION_TYPES
 from smartcut.desktop.formatting import seconds_or_none
+from smartcut.desktop.theme import NLE
+
+_TRANSITION_TYPES = tuple(TRANSITION_TYPES)
 
 MIN_SEGMENT = 0.1
 EDGE_PX = 6.0
@@ -21,6 +26,9 @@ class TimelineWidget(QWidget):
     segment_selected = Signal(int, object)
     selection_cleared = Signal()
     segments_edited = Signal(object)
+    asset_dropped = Signal(object, float, int)
+    transition_changed = Signal(str, float, str)
+    track_state_changed = Signal(int, str, bool)
     view_changed = Signal(float, float)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -35,19 +43,31 @@ class TimelineWidget(QWidget):
         self.view_start = 0.0
         self.thumbnails: list[tuple[float, QPixmap]] = []
         self.waveform: list[float] = []
+        self.source_durations: dict[str, float] = {}
+        self.track_states: dict[int, dict] = {}
+        self.transitions: list[dict] = []
+        self.pips: list[dict] = []
+        self.output_time_enabled = False
+        self.default_transition_type = "fade"
+        self._transition_preview: dict | None = None
         self.audio_tracks: list[dict] = []
         self.audio_waveforms: dict[str, list[float]] = {}
         self.effect_segments: set[str] = set()
         self._selected = -1
         self._drag: dict | None = None
         self._pan: dict | None = None
+        self._snap_line: float | None = None
         self._diff_added: set[tuple[float, float]] = set()
         self._diff_removed: set[tuple[float, float]] = set()
         self._diff_unchanged: set[tuple[float, float]] = set()
         self._diff_active = False
         self.setMinimumHeight(150)
         self.setMouseTracking(True)
-        self.setToolTip("滚轮缩放；Shift+滚轮或中键拖动平移；拖动片段移动，拖动边缘裁剪")
+        self.setAcceptDrops(True)
+        self.setToolTip(
+            "滚轮缩放；Shift+滚轮或中键拖动平移；拖动片段移动，拖动边缘裁剪；"
+            "从素材 bin 拖入可追加片段"
+        )
 
     @property
     def visible_duration(self) -> float:
@@ -64,13 +84,20 @@ class TimelineWidget(QWidget):
         position: float | None = None,
     ) -> None:
         previous_duration = self.duration
-        self.duration = max(float(duration), 0.0)
         self.segments = [deepcopy(segment) for segment in segments]
+        self.duration = max(float(duration), 0.0)
+        if self.output_time_enabled:
+            _, total = self._output_spans()
+            self.duration = total
         if self.duration != previous_duration:
             self.zoom = 1.0
             self.view_start = 0.0
         if position is not None:
-            self.position = max(float(position), 0.0)
+            self.position = (
+                self._source_to_output(float(position))
+                if self.output_time_enabled
+                else max(float(position), 0.0)
+            )
         if self._selected >= len(self.segments):
             self._selected = -1
         self._clamp_view()
@@ -81,7 +108,11 @@ class TimelineWidget(QWidget):
         self.update()
 
     def set_position(self, seconds: float) -> None:
-        self.position = max(float(seconds), 0.0)
+        self.position = (
+            self._source_to_output(float(seconds))
+            if self.output_time_enabled
+            else max(float(seconds), 0.0)
+        )
         if self.duration > 0:
             visible = self.visible_duration
             if self.position < self.view_start or self.position > self.view_end:
@@ -104,6 +135,189 @@ class TimelineWidget(QWidget):
     def set_thumbnails(self, thumbnails: list[tuple[float, QPixmap]]) -> None:
         self.thumbnails = list(thumbnails)
         self.update()
+
+    def set_output_time(self, enabled: bool) -> None:
+        self.output_time_enabled = bool(enabled)
+        self.update()
+
+    def _speed(self, segment: dict) -> float:
+        try:
+            return max(0.5, min(2.0, float(segment.get("speed") or 1.0)))
+        except (TypeError, ValueError):
+            return 1.0
+
+    def _output_spans(self) -> tuple[list[tuple[float, float]], float]:
+        if not self.output_time_enabled:
+            spans: list[tuple[float, float]] = []
+            for segment in self.segments:
+                try:
+                    spans.append(
+                        (float(segment["start"]), float(segment["end"]))
+                    )
+                except (KeyError, TypeError, ValueError):
+                    spans.append((0.0, 0.0))
+            return spans, self.duration
+        transition_by_after = {
+            str(item.get("after")): self._duration_seconds(
+                item.get("duration")
+            )
+            for item in self.transitions
+        }
+        absolute = any(
+            segment.get("timeline_start") is not None
+            for segment in self.segments
+        )
+        spans = []
+        cursor = 0.0
+        for segment in self.segments:
+            try:
+                duration = max(
+                    0.0,
+                    (float(segment["end"]) - float(segment["start"]))
+                    / self._speed(segment),
+                )
+            except (KeyError, TypeError, ValueError):
+                duration = 0.0
+            explicit = segment.get("timeline_start")
+            if absolute and explicit is not None:
+                start = max(0.0, float(explicit))
+                end = start + duration
+            else:
+                start = cursor
+                end = start + duration
+            spans.append((start, end))
+            cursor = max(0.0, end - transition_by_after.get(str(segment.get("id")), 0.0))
+        if absolute:
+            cursor = max((end for _, end in spans), default=0.0)
+        return spans, cursor
+
+    def _span_for(self, segment: dict) -> tuple[float, float]:
+        spans, _ = self._output_spans()
+        for index, item in enumerate(self.segments):
+            if item is segment:
+                return spans[index]
+        try:
+            index = self.segments.index(segment)
+            return spans[index]
+        except (ValueError, IndexError):
+            return (0.0, 0.0)
+
+    def _source_to_output(self, seconds: float) -> float:
+        if not self.output_time_enabled:
+            return max(0.0, float(seconds))
+        spans, _ = self._output_spans()
+        for index, segment in enumerate(self.segments):
+            try:
+                start = float(segment["start"])
+                end = float(segment["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if start <= seconds <= end:
+                span_start = spans[index][0]
+                return span_start + (seconds - start) / self._speed(segment)
+        if spans:
+            return max(0.0, min(self.duration, spans[-1][1]))
+        return max(0.0, float(seconds))
+
+    def _output_to_source(self, seconds: float) -> float:
+        if not self.output_time_enabled:
+            return max(0.0, float(seconds))
+        spans, _ = self._output_spans()
+        for index, segment in enumerate(self.segments):
+            span_start, span_end = spans[index]
+            if span_start <= seconds <= span_end:
+                try:
+                    source_start = float(segment["start"])
+                except (KeyError, TypeError, ValueError):
+                    return span_start
+                return source_start + (seconds - span_start) * self._speed(segment)
+        if self.segments:
+            try:
+                return float(self.segments[-1].get("end") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+        return max(0.0, float(seconds))
+
+    def set_transitions(self, transitions: list[dict] | None) -> None:
+        self.transitions = [dict(item) for item in transitions or []]
+        self.update()
+
+    def set_track_states(self, states: dict | None) -> None:
+        self.track_states = {
+            int(track): dict(value)
+            for track, value in (states or {}).items()
+        }
+        self.update()
+
+    def _header_hit(self, x: float, y: float) -> tuple[int, str] | None:
+        for track, lane in enumerate(self._track_lanes()):
+            if not (lane.top() <= y <= lane.bottom()):
+                continue
+            if lane.left() + 24 <= x <= lane.left() + 24 + 3 * 18:
+                field = ("muted", "solo", "locked")[
+                    min(2, int((x - lane.left() - 24) // 18))
+                ]
+                return track, field
+        return None
+
+    def set_pips(self, pips: list[dict] | None) -> None:
+        self.pips = [dict(item) for item in pips or []]
+        self.update()
+
+    def _paint_pips(self, painter: QPainter, lane: QRectF) -> None:
+        for pip in self.pips:
+            start = self._duration_seconds(pip.get("timeline_start"))
+            duration = self._duration_seconds(pip.get("duration"))
+            if duration <= 0:
+                continue
+            x1 = self._time_to_x(start, lane)
+            x2 = self._time_to_x(start + duration, lane)
+            rect = QRectF(x1, lane.top() + 1, max(4.0, x2 - x1), 9)
+            painter.setPen(QPen(QColor("#22d3ee"), 1))
+            painter.setBrush(QColor(34, 211, 238, 60))
+            painter.drawRoundedRect(rect, 3, 3)
+            if rect.width() > 28:
+                painter.setPen(QColor("#a5f3fc"))
+                painter.drawText(
+                    rect.adjusted(3, 0, -3, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    "PiP",
+                )
+
+    @staticmethod
+    def _duration_seconds(value) -> float:
+        if isinstance(value, dict):
+            try:
+                return float(value.get("value", 0)) / float(
+                    value.get("rate", 1)
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
+                return 0.0
+        try:
+            return float(value or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _transition_for(self, segment_id: str) -> dict | None:
+        return next(
+            (
+                item
+                for item in self.transitions
+                if str(item.get("after")) == segment_id
+            ),
+            None,
+        )
+
+    def set_source_durations(self, durations: dict[str, float]) -> None:
+        self.source_durations = {
+            str(key): float(value)
+            for key, value in (durations or {}).items()
+            if value is not None and float(value) > 0
+        }
+
+    def _limit_for(self, segment: dict | None) -> float:
+        src = str((segment or {}).get("src") or "")
+        return self.source_durations.get(src, self.duration)
 
     def set_waveform(self, peaks: list[float]) -> None:
         self.waveform = [max(0.0, min(1.0, float(value))) for value in peaks]
@@ -210,6 +424,9 @@ class TimelineWidget(QWidget):
     def _inner(self) -> QRectF:
         return QRectF(self.rect().adjusted(14, 10, -14, -10))
 
+    def _track_count(self) -> int:
+        return max(1, max((int(s.get("track") or 0) for s in self.segments), default=0) + 1)
+
     def _lanes_full(self) -> tuple[QRectF, QRectF, QRectF, QRectF, QRectF]:
         inner = self._inner()
         ruler = QRectF(inner.left(), inner.top(), inner.width(), 16)
@@ -224,9 +441,34 @@ class TimelineWidget(QWidget):
         )
         return ruler, thumbs, wave, audio, segments
 
+    def _track_lanes(self) -> list[QRectF]:
+        _ruler, _thumbs, _wave, _audio, area = self._lanes_full()
+        count = self._track_count()
+        lane_height = max(30.0, area.height() / count)
+        return [
+            QRectF(
+                area.left(),
+                area.bottom() - (track + 1) * lane_height,
+                area.width(),
+                lane_height,
+            )
+            for track in range(count)
+        ]
+
+    def _lane_for_track(self, track: int) -> QRectF:
+        lanes = self._track_lanes()
+        index = max(0, min(int(track), len(lanes) - 1))
+        return lanes[index]
+
+    def _track_at_y(self, y: float) -> int:
+        for track, lane in enumerate(self._track_lanes()):
+            if lane.top() <= y <= lane.bottom():
+                return track
+        return 0
+
     def _lanes(self) -> tuple[QRectF, QRectF, QRectF, QRectF]:
-        ruler, thumbs, wave, _audio, segments = self._lanes_full()
-        return ruler, thumbs, wave, segments
+        ruler, thumbs, wave, _audio, _segments = self._lanes_full()
+        return ruler, thumbs, wave, self._lane_for_track(0)
 
     def _time_to_x(self, seconds: float, lane: QRectF) -> float:
         visible = self.visible_duration
@@ -240,17 +482,17 @@ class TimelineWidget(QWidget):
         return self.view_start + (x - lane.left()) / lane.width() * self.visible_duration
 
     def sizeHint(self) -> QSize:
-        return QSize(700, 190)
+        return QSize(700, 190 + 30 * (self._track_count() - 1))
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect().adjusted(6, 6, -6, -6))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#111827"))
+        painter.setBrush(QColor(NLE["canvas"]))
         painter.drawRoundedRect(rect, 8, 8)
         if self.duration <= 0:
-            painter.setPen(QColor("#94a3b8"))
+            painter.setPen(QColor(NLE["text"]))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, "暂无时间线")
             return
 
@@ -260,13 +502,17 @@ class TimelineWidget(QWidget):
         self._paint_thumbnails(painter, thumbs)
         self._paint_waveform(painter, wave)
         self._paint_audio(painter, audio)
-        self._paint_segments(painter, segments)
+        for track, lane in enumerate(self._track_lanes()):
+            self._paint_segments(painter, lane, track)
+        self._paint_pips(painter, self._lane_for_track(0))
+        self._paint_transitions(painter, self._lane_for_track(0))
         self._paint_overlays(painter, ruler, segments)
+        self._paint_snap_line(painter, ruler, segments)
         self._paint_playhead(painter, ruler, segments)
 
     def _paint_ruler(self, painter: QPainter, ruler: QRectF) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#0b1220"))
+        painter.setBrush(QColor(NLE["lane"]))
         painter.drawRoundedRect(ruler, 3, 3)
         visible = self.visible_duration
         target = visible / 8.0
@@ -282,9 +528,9 @@ class TimelineWidget(QWidget):
         value = first
         while value <= self.view_end + 1e-6:
             x = self._time_to_x(value, ruler)
-            painter.setPen(QPen(QColor("#334155"), 1))
+            painter.setPen(QPen(QColor(NLE["grid"]), 1))
             painter.drawLine(x, ruler.top(), x, ruler.bottom())
-            painter.setPen(QColor("#94a3b8"))
+            painter.setPen(QColor(NLE["text"]))
             painter.drawText(
                 QRectF(x + 3, ruler.top() - 1, 70, 15),
                 Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -297,7 +543,7 @@ class TimelineWidget(QWidget):
             return
         colors = {
             "tile": QColor("#38bdf8"),
-            "silence": QColor("#f59e0b"),
+            "silence": QColor(NLE["solo"]),
             "candidate": QColor("#a78bfa"),
         }
         font = QFont()
@@ -331,7 +577,7 @@ class TimelineWidget(QWidget):
 
     def _paint_thumbnails(self, painter: QPainter, lane: QRectF) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#0b1220"))
+        painter.setBrush(QColor(NLE["lane"]))
         painter.drawRoundedRect(lane, 3, 3)
         height = lane.height()
         width = height * 16 / 9
@@ -343,9 +589,9 @@ class TimelineWidget(QWidget):
 
     def _paint_waveform(self, painter: QPainter, lane: QRectF) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#0b1220"))
+        painter.setBrush(QColor(NLE["lane"]))
         painter.drawRoundedRect(lane, 3, 3)
-        painter.setPen(QPen(QColor("#334155"), 1))
+        painter.setPen(QPen(QColor(NLE["grid"]), 1))
         center = lane.center().y()
         painter.drawLine(lane.left(), center, lane.right(), center)
         if not self.waveform or self.duration <= 0:
@@ -362,10 +608,10 @@ class TimelineWidget(QWidget):
 
     def _paint_audio(self, painter: QPainter, lane: QRectF) -> None:
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#0b1220"))
+        painter.setBrush(QColor(NLE["lane"]))
         painter.drawRoundedRect(lane, 3, 3)
         if not self.audio_tracks:
-            painter.setPen(QColor("#475569"))
+            painter.setPen(QColor(NLE["muted"]))
             font = QFont()
             font.setPointSize(8)
             painter.setFont(font)
@@ -400,17 +646,13 @@ class TimelineWidget(QWidget):
                 row_height - 2,
             )
             if track["muted"]:
-                color = QColor("#475569")
+                color = QColor(NLE["muted"])
             elif track["solo"]:
-                color = QColor("#d97706")
+                color = QColor(NLE["solo"])
             else:
-                color = {
-                    "main": QColor("#2563eb"),
-                    "music": QColor("#0d9488"),
-                    "voice": QColor("#7c3aed"),
-                    "stem_vocals": QColor("#db2777"),
-                    "stem_instrumental": QColor("#0891b2"),
-                }.get(track["role"], QColor("#475569"))
+                color = QColor(
+                    NLE["audio_palette"].get(track["role"], NLE["muted"])
+                )
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(color)
             painter.drawRoundedRect(rect, 3, 3)
@@ -418,7 +660,7 @@ class TimelineWidget(QWidget):
 
             label = track["name"] or track["asset_id"]
             if rect.width() > 36:
-                painter.setPen(QColor("#f8fafc"))
+                painter.setPen(QColor(NLE["white"]))
                 painter.drawText(
                     rect.adjusted(4, 0, -4, 0),
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -454,8 +696,13 @@ class TimelineWidget(QWidget):
 
     def _segment_rect(self, segment: dict, lane: QRectF) -> QRectF | None:
         try:
-            start = max(float(segment["start"]), 0.0)
-            end = min(float(segment["end"]), self.duration)
+            if self.output_time_enabled:
+                start, end = self._span_for(segment)
+                start = max(start, 0.0)
+                end = min(end, self.duration)
+            else:
+                start = max(float(segment["start"]), 0.0)
+                end = min(float(segment["end"]), self.duration)
         except (KeyError, TypeError, ValueError):
             return None
         if end <= start or end < self.view_start or start > self.view_end:
@@ -464,11 +711,52 @@ class TimelineWidget(QWidget):
         x2 = self._time_to_x(min(end, self.view_end), lane)
         return QRectF(x1, lane.top(), max(2.0, x2 - x1), lane.height())
 
-    def _paint_segments(self, painter: QPainter, lane: QRectF) -> None:
+    @staticmethod
+    def _source_color(src: str) -> QColor:
+        palette = NLE["clip_palette"]
+        index = sum(ord(char) for char in src) % len(palette) if src else 0
+        return QColor(palette[index])
+
+    def _paint_segments(
+        self, painter: QPainter, lane: QRectF, track: int = 0
+    ) -> None:
         font = QFont()
         font.setPointSize(9)
         painter.setFont(font)
+        painter.setPen(QColor(NLE["muted"]))
+        painter.drawText(
+            QRectF(lane.left() + 2, lane.top() + 1, 22, 12),
+            Qt.AlignmentFlag.AlignLeft,
+            f"V{track + 1}",
+        )
+        state = self.track_states.get(track) or {}
+        for offset, (field, label) in enumerate(
+            (("muted", "M"), ("solo", "S"), ("locked", "L"))
+        ):
+            active = bool(state.get(field))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(
+                QColor(
+                    NLE["playhead"] if field == "muted" and active else
+                    NLE["solo"] if field == "solo" and active else
+                    NLE["text"] if field == "locked" and active else
+                    NLE["badge"]
+                )
+            )
+            painter.drawRoundedRect(
+                QRectF(lane.left() + 24 + offset * 18, lane.top() + 1, 16, 11),
+                2,
+                2,
+            )
+            painter.setPen(QColor(NLE["white"]))
+            painter.drawText(
+                QRectF(lane.left() + 24 + offset * 18, lane.top() + 1, 16, 11),
+                Qt.AlignmentFlag.AlignCenter,
+                label,
+            )
         for index, segment in enumerate(self.segments):
+            if int(segment.get("track") or 0) != track:
+                continue
             segment_rect = self._segment_rect(segment, lane)
             if segment_rect is None:
                 continue
@@ -479,25 +767,27 @@ class TimelineWidget(QWidget):
             )
             if self._diff_active:
                 if key in self._diff_added:
-                    color = QColor("#16a34a")
+                    color = QColor("#22c55e")
                 elif key in self._diff_unchanged:
-                    color = QColor("#2563eb")
+                    color = QColor("#3b82f6")
                 else:
-                    color = QColor("#64748b")
+                    color = QColor(NLE["muted"])
             else:
                 color = (
-                    QColor("#f59e0b")
+                    QColor(NLE["solo"])
                     if confidence is not None and confidence < 0.6
-                    else QColor("#2563eb")
+                    else self._source_color(str(segment.get("src") or ""))
                 )
             painter.setBrush(color)
             painter.setPen(
-                QPen(QColor("#f8fafc"), 2) if index == self._selected else Qt.PenStyle.NoPen
+                QPen(QColor(NLE["selection"]), 2)
+                if index == self._selected
+                else Qt.PenStyle.NoPen
             )
             painter.drawRoundedRect(segment_rect, 4, 4)
             tag = str(segment.get("tag") or "")
             if tag and segment_rect.width() > 42:
-                painter.setPen(QColor("#f8fafc"))
+                painter.setPen(QColor(NLE["white"]))
                 painter.drawText(
                     segment_rect.adjusted(6, 0, -6, 0),
                     Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -523,13 +813,13 @@ class TimelineWidget(QWidget):
                 badge_font.setPointSize(7)
                 badge_font.setBold(True)
                 painter.setFont(badge_font)
-                painter.setPen(QColor("#0b1220"))
+                painter.setPen(QColor(NLE["lane"]))
                 painter.drawText(badge, Qt.AlignmentFlag.AlignCenter, "FX")
                 painter.restore()
 
         if self._diff_active:
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(239, 68, 68, 180))
+            painter.setBrush(QColor(244, 63, 94, 180))
             for start, end in sorted(self._diff_removed):
                 if end < self.view_start or start > self.view_end:
                     continue
@@ -553,7 +843,7 @@ class TimelineWidget(QWidget):
             if value is not None and self.view_start <= value <= self.view_end
         ]
         step = max(1, len(visible_shots) // 200)
-        painter.setPen(QPen(QColor("#f59e0b"), 1, Qt.PenStyle.DashLine))
+        painter.setPen(QPen(QColor(NLE["solo"]), 1, Qt.PenStyle.DashLine))
         for seconds in visible_shots[::step]:
             x = self._time_to_x(seconds, segments)
             painter.drawLine(x, ruler.bottom(), x, segments.bottom())
@@ -565,10 +855,138 @@ class TimelineWidget(QWidget):
         ]
         step = max(1, len(visible_marks) // 200)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#ef4444"))
+        painter.setBrush(QColor(NLE["playhead"]))
         for seconds in visible_marks[::step]:
             x = self._time_to_x(seconds, segments)
             painter.drawEllipse(QRectF(x - 2.5, segments.bottom() - 5, 5, 5))
+
+    def _paint_transitions(self, painter: QPainter, lane: QRectF) -> None:
+        preview = self._transition_preview
+        for index, segment in enumerate(self.segments[:-1]):
+            rect = self._segment_rect(segment, lane)
+            if rect is None:
+                continue
+            after = str(segment.get("id") or "")
+            spec = self._transition_for(after)
+            if spec is None and not (
+                preview and preview.get("after") == after
+            ):
+                continue
+            duration = (
+                preview["duration"]
+                if preview and preview.get("after") == after
+                else self._duration_seconds(spec.get("duration") if spec else 0)
+            )
+            if duration <= 0:
+                continue
+            right = self.segments[index + 1]
+            rect_right = self._segment_rect(right, lane)
+            x = rect.right() if rect_right is None else rect_right.left()
+            width = max(6.0, min(28.0, duration * 12))
+            painter.setPen(QPen(QColor("#38bdf8"), 2))
+            painter.setBrush(QColor(56, 189, 248, 70))
+            painter.drawRect(QRectF(x - width / 2, lane.top() + 1, width, 8))
+            painter.setPen(QColor("#bae6fd"))
+            painter.drawText(
+                QRectF(x - 32, lane.top() - 12, 64, 12),
+                Qt.AlignmentFlag.AlignCenter,
+                f"{(spec or {}).get('type', 'fade')} {duration:.1f}s",
+            )
+
+    def _paint_snap_line(
+        self,
+        painter: QPainter,
+        ruler: QRectF,
+        segments: QRectF,
+    ) -> None:
+        if self._snap_line is None:
+            return
+        x = self._time_to_x(self._snap_line, segments)
+        painter.setPen(QPen(QColor("#facc15"), 1.5, Qt.PenStyle.DashLine))
+        painter.drawLine(x, ruler.top(), x, segments.bottom())
+        painter.setPen(QColor("#facc15"))
+        painter.drawText(
+            QRectF(x + 3, ruler.top(), 40, 12),
+            Qt.AlignmentFlag.AlignLeft,
+            "吸附",
+        )
+
+    def _snap_candidates(self) -> list[tuple[float, int]]:
+        values: list[tuple[float, int]] = [(self.position, 0)]
+        if self.output_time_enabled:
+            spans, _ = self._output_spans()
+            for start, end in spans:
+                values.append((start, 1))
+                values.append((end, 1))
+        else:
+            for segment in self.segments:
+                try:
+                    values.append((float(segment["start"]), 1))
+                    values.append((float(segment["end"]), 1))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        for shot in self.shots:
+            value = seconds_or_none(shot.get("t"))
+            if value is not None:
+                values.append(
+                    (
+                        self._source_to_output(value)
+                        if self.output_time_enabled
+                        else value,
+                        2,
+                    )
+                )
+        for mark in self.quality_marks:
+            value = seconds_or_none(mark.get("t"))
+            if value is not None:
+                values.append(
+                    (
+                        self._source_to_output(value)
+                        if self.output_time_enabled
+                        else value,
+                        3,
+                    )
+                )
+        for item in self.evidence:
+            for key in ("start", "end"):
+                value = seconds_or_none(item.get(key))
+                if value is not None:
+                    values.append(
+                        (
+                            self._source_to_output(value)
+                            if self.output_time_enabled
+                            else value,
+                            4,
+                        )
+                    )
+        for track in self.audio_tracks:
+            value = seconds_or_none(track.get("timeline_start"))
+            if value is not None:
+                values.append((value, 5))
+        return values
+
+    def _snap_source(self, value: float) -> float:
+        if not self.output_time_enabled:
+            return self._snap(value)
+        snapped_output = self._snap(self._source_to_output(value))
+        return self._output_to_source(snapped_output)
+
+    def _snap(self, value: float, *, exclude: int | None = None) -> float:
+        lane = self._lanes()[3]
+        if lane.width() <= 0:
+            return value
+        threshold = 8.0 / lane.width() * self.visible_duration
+        best: tuple[float, int, float] | None = None
+        for index, (candidate, priority) in enumerate(self._snap_candidates()):
+            if exclude is not None and index == exclude:
+                continue
+            distance = abs(candidate - value)
+            if distance > threshold:
+                continue
+            key = (distance, priority, candidate)
+            if best is None or key < best:
+                best = key
+        return best[2] if best is not None else value
 
     def _paint_playhead(
         self,
@@ -579,21 +997,101 @@ class TimelineWidget(QWidget):
         if not (self.view_start <= self.position <= self.view_end):
             return
         x = self._time_to_x(self.position, segments)
-        painter.setPen(QPen(QColor("#ef4444"), 2))
-        painter.drawLine(x, ruler.top(), x, segments.bottom())
+        painter.setPen(QPen(QColor(NLE["playhead"]), 2))
+        painter.drawLine(x, ruler.top(), x, self._track_lanes()[-1].bottom())
 
     def _hit(self, x: float, y: float) -> tuple[int, str] | None:
-        _ruler, _thumbs, _wave, lane = self._lanes()
-        for index in range(len(self.segments) - 1, -1, -1):
-            rect = self._segment_rect(self.segments[index], lane)
-            if rect is None or not rect.adjusted(0, -4, 0, 4).contains(x, y):
+        for track, lane in enumerate(self._track_lanes()):
+            if not (lane.top() - 4 <= y <= lane.bottom() + 4):
                 continue
-            if x - rect.left() <= EDGE_PX:
-                return index, "left"
-            if rect.right() - x <= EDGE_PX:
-                return index, "right"
-            return index, "move"
+            if lane.top() <= y <= lane.top() + 10:
+                for index in range(len(self.segments) - 1):
+                    segment = self.segments[index]
+                    if int(segment.get("track") or 0) != track:
+                        continue
+                    rect = self._segment_rect(segment, lane)
+                    if rect is not None and abs(x - rect.right()) <= 10:
+                        return index, "transition"
+            for index in range(len(self.segments) - 1, -1, -1):
+                segment = self.segments[index]
+                if int(segment.get("track") or 0) != track:
+                    continue
+                rect = self._segment_rect(segment, lane)
+                if rect is None:
+                    continue
+                if not rect.adjusted(0, -4, 0, 4).contains(x, y):
+                    continue
+                if x - rect.left() <= EDGE_PX:
+                    return index, "left"
+                if rect.right() - x <= EDGE_PX:
+                    return index, "right"
+                return index, "move"
         return None
+
+    def contextMenuEvent(self, event) -> None:
+        if self.duration <= 0:
+            return
+        lane = self._lanes()[3]
+        hit = self._hit(event.pos().x(), event.pos().y())
+        if hit is None or hit[1] != "transition":
+            return
+        index, _ = hit
+        segment = self.segments[index]
+        after = str(segment.get("id") or "")
+        spec = self._transition_for(after)
+        duration = self._duration_seconds(
+            (spec or {}).get("duration")
+        ) or 0.5
+        from PySide6.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        for kind in _TRANSITION_TYPES:
+            action = menu.addAction(kind)
+            action.setCheckable(True)
+            action.setChecked(
+                str((spec or {}).get("type") or self.default_transition_type)
+                == kind
+            )
+            action.triggered.connect(
+                lambda _checked=False, value=kind: self.transition_changed.emit(
+                    after, duration, value
+                )
+            )
+        menu.exec(event.globalPos())
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat("application/x-smartcut-media"):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        if event.mimeData().hasFormat("application/x-smartcut-media"):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:
+        mime = event.mimeData()
+        if not mime.hasFormat("application/x-smartcut-media"):
+            event.ignore()
+            return
+        try:
+            payload = json.loads(
+                bytes(mime.data("application/x-smartcut-media")).decode(
+                    "utf-8"
+                )
+            )
+        except (ValueError, UnicodeDecodeError):
+            event.ignore()
+            return
+        lane = self._lanes()[3]
+        seconds = self._x_to_time(event.position().x(), lane)
+        track = self._track_at_y(event.position().y())
+        for asset in payload if isinstance(payload, list) else [payload]:
+            if isinstance(asset, dict) and asset.get("src"):
+                self.asset_dropped.emit(asset, seconds, track)
+        event.acceptProposedAction()
 
     def wheelEvent(self, event) -> None:
         if self.duration <= 0:
@@ -611,6 +1109,16 @@ class TimelineWidget(QWidget):
         if self.duration <= 0:
             return
         _ruler, _thumbs, _wave, lane = self._lanes()
+        if event.button() == Qt.MouseButton.LeftButton:
+            header = self._header_hit(event.position().x(), event.position().y())
+            if header is not None:
+                track, field = header
+                state = dict(self.track_states.get(track) or {})
+                state[field] = not bool(state.get(field))
+                self.track_states[track] = state
+                self.track_state_changed.emit(track, field, bool(state[field]))
+                self.update()
+                return
         if event.button() == Qt.MouseButton.MiddleButton:
             self._pan = {"x": event.position().x(), "start": self.view_start}
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -629,6 +1137,31 @@ class TimelineWidget(QWidget):
         self.update()
         segment = deepcopy(self.segments[index])
         self.segment_selected.emit(index, segment)
+        if (self.track_states.get(int(segment.get("track") or 0)) or {}).get(
+            "locked"
+        ):
+            self._drag = None
+            return
+        if zone == "transition":
+            after = str(segment.get("id") or "")
+            spec = self._transition_for(after)
+            self._drag = {
+                "zone": "transition",
+                "index": index,
+                "after": after,
+                "type": str(
+                    (spec or {}).get("type")
+                    or self.default_transition_type
+                    or "fade"
+                ),
+                "duration": self._duration_seconds(
+                    (spec or {}).get("duration")
+                ),
+                "x": event.position().x(),
+                "moved": False,
+            }
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+            return
         self._drag = {
             "index": index,
             "zone": zone,
@@ -665,6 +1198,40 @@ class TimelineWidget(QWidget):
             return
         if lane.width() <= 0:
             return
+        if self._drag.get("zone") == "transition":
+            delta = (
+                (event.position().x() - self._drag["x"])
+                / lane.width()
+                * self.visible_duration
+            )
+            index = int(self._drag["index"])
+            left = self.segments[index]
+            right = (
+                self.segments[index + 1]
+                if index + 1 < len(self.segments)
+                else None
+            )
+            max_left = float(left["end"]) - float(left["start"])
+            max_right = (
+                float(right["end"]) - float(right["start"])
+                if right is not None
+                else max_left
+            )
+            limit = max(0.1, min(max_left, max_right))
+            duration = max(
+                0.0,
+                min(limit, float(self._drag["duration"]) + delta),
+            )
+            if abs(delta) >= 0.001:
+                self._drag["moved"] = True
+            self._drag["duration"] = duration
+            self._transition_preview = {
+                "after": self._drag["after"],
+                "duration": duration,
+                "type": self._drag["type"],
+            }
+            self.update()
+            return
         delta = (
             (event.position().x() - self._drag["x"]) / lane.width() * self.visible_duration
         )
@@ -675,9 +1242,43 @@ class TimelineWidget(QWidget):
         original_start = self._drag["start"]
         original_end = self._drag["end"]
         zone = self._drag["zone"]
+        limit = self._limit_for(self.segments[index] if index < len(self.segments) else None)
+        snap_enabled = not (
+            event.modifiers() & Qt.KeyboardModifier.AltModifier
+        )
+        snapped: float | None = None
+        if snap_enabled:
+            start_candidate = original_start + delta
+            end_candidate = original_end + delta
+            if zone == "move":
+                start_snap = self._snap_source(start_candidate)
+                end_snap = self._snap_source(end_candidate)
+                start_adj = start_snap - start_candidate
+                end_adj = end_snap - end_candidate
+                if abs(start_adj) <= abs(end_adj) and start_adj != 0:
+                    delta += start_adj
+                    snapped = start_snap
+                elif end_adj != 0:
+                    delta += end_adj
+                    snapped = end_snap
+            elif zone == "left":
+                start_snap = self._snap_source(start_candidate)
+                if start_snap != start_candidate:
+                    delta = start_snap - original_start
+                    snapped = start_snap
+            else:
+                end_snap = self._snap_source(end_candidate)
+                if end_snap != end_candidate:
+                    delta = end_snap - original_end
+                    snapped = end_snap
+        self._snap_line = (
+            self._source_to_output(snapped)
+            if snapped is not None and self.output_time_enabled
+            else snapped
+        )
         if zone == "move":
             length = original_end - original_start
-            start = max(0.0, min(original_start + delta, self.duration - length))
+            start = max(0.0, min(original_start + delta, limit - length))
             end = start + length
         elif zone == "left":
             start = max(0.0, min(original_start + delta, original_end - MIN_SEGMENT))
@@ -685,7 +1286,7 @@ class TimelineWidget(QWidget):
         else:
             start = original_start
             end = min(
-                self.duration,
+                limit,
                 max(original_end + delta, original_start + MIN_SEGMENT),
             )
         self.segments[index] = {
@@ -704,14 +1305,32 @@ class TimelineWidget(QWidget):
         if self._drag is None:
             return
         moved = bool(self._drag.get("moved"))
+        transition = (
+            self._drag
+            if self._drag.get("zone") == "transition"
+            else None
+        )
         self._drag = None
+        self._snap_line = None
+        self._transition_preview = None
+        self.update()
         self.setCursor(Qt.CursorShape.ArrowCursor)
-        if moved:
+        if transition is not None and moved:
+            duration = 0.0 if transition["duration"] < 0.05 else transition["duration"]
+            self.transition_changed.emit(
+                str(transition["after"]),
+                duration,
+                str(transition["type"]),
+            )
+        elif moved:
             self.segments_edited.emit([deepcopy(item) for item in self.segments])
 
     def _emit_seek(self, x: float, lane: QRectF) -> None:
+        seconds = max(0.0, min(self.duration, self._x_to_time(x, lane)))
         self.seek_requested.emit(
-            max(0.0, min(self.duration, self._x_to_time(x, lane)))
+            self._output_to_source(seconds)
+            if self.output_time_enabled
+            else seconds
         )
 
 

@@ -25,12 +25,12 @@ class PreferencePanel(QWidget):
 
         self.tags = QLabel("常用标签：-")
         self.tags.setWordWrap(True)
-        self.tags.setStyleSheet("color:#64748b;")
+        self.tags.setObjectName("mutedText")
         layout.addWidget(self.tags)
 
         self.notes = QLabel("")
         self.notes.setWordWrap(True)
-        self.notes.setStyleSheet("color:#64748b;")
+        self.notes.setObjectName("mutedText")
         layout.addWidget(self.notes)
 
         self.pace_checkbox = QCheckBox("按我的节奏规划（跨素材复用偏好）")

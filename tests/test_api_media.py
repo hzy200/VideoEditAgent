@@ -93,3 +93,13 @@ def test_media_api_diagnose_repair_and_interpret(
         assert op_job["status"] == "succeeded", op_job
         assert op_job["result"]["operation"] == "convert"
         assert op_job["result"]["output_path"].endswith(".mkv")
+
+        understand = client.post(
+            f"/api/projects/{project_id}/understand",
+            json={"question": "视频大致讲了什么？"},
+        )
+        assert understand.status_code == 202, understand.text
+        understand_job = _wait(client, understand.json()["job_id"])
+        assert understand_job["status"] == "succeeded", understand_job
+        assert understand_job["result"]["mode"] == "understanding"
+        assert "媒体事实" in understand_job["result"]["answer"]

@@ -88,8 +88,9 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
 - **人声分离（可选）**：`Separator` 协议 + 外部 Demucs 2-stem 适配器，
   独立进程生成人声/伴奏；结果按内容寻址缓存并注册为音频素材；
   主程序不打包 PyTorch，UVR/MDX 可后续接入同一协议。
-- **专业界面**：深/浅色 QSS、顶部图标工具栏、统一面板/表格/滑杆样式；
-  高对比度与界面缩放继续可用。
+- **专业界面**：深色专业 NLE 风格（深石墨分层表面、青蓝强调、胶囊工作区
+  导航、图标分组工具栏、传输条、主/次/危险按钮层级）＋精修浅色主题；
+  时间线/曲线/证据画布固定深色剪辑台；高对比度与界面缩放继续可用。
 - **GUI 可视化**：revision diff 高亮（新增/删除/未变）、候选片段搜索与一键加入、
   Agent 指标面板（队列/耗时/重试/缓存/token/编码器）。
 - **可解释选段**：时间线「依据」列与 Inspector 展示每段 rationale；候选 tooltip
@@ -160,7 +161,21 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   约束，`scripts/check_drift.py` 防止代码与配置漂移。
 - **内嵌资源**：ffmpeg/ffprobe、base whisper 模型、OpenCV Haar 数据随 exe 分发。
 - **数据与密钥**：数据写 `%LOCALAPPDATA%\SmartCut`；API Key 存 Windows Credential Manager。
-- **版本与手工精修**：revision 列表、片段起止编辑、dry-run、渲染、产物。
+- **版本与手工精修**：导入后自动生成全片单段基线，时间线可立即分割/裁剪/
+  拖动/删除；revision 切换、起止编辑、dry-run、渲染、产物。
+- **即时预览**：导入后先用源文件播放并显示时长，代理后台生成完成后无感切换，
+  不再等待整段代理。
+- **视频理解问答**：AI 面板“仅理解并回答”只读转写/章节/媒体事实，输出文字
+  总结或回答问题，不创建 revision、不渲染、不改时间线；无 LLM 时规则降级。
+- **多素材 bin / NLE 交互**：项目 bin 保留多个素材并可拖入时间线；时间线按
+  输出时间/ripple 绘制，拖动/裁剪支持磁性吸附（Alt 关闭），在相邻片段边界
+  拖拽创建/调整转场（9+ 种 xfade，可选音频曲线）；多源时间线按
+  `source_facts` 编译，逐 clip 统一分辨率/fps 并为无音轨素材补静音后拼接；
+  视频素材可一键添加画中画并写入 V2+ 叠加轨，预览区可拖拽/缩放 PiP 框、
+  用关键帧编辑器逐点编辑/删除并做 scale/overlay/alpha 插值；绝对输出时间线
+  支持空隙/多轨 `timeline_start`、V1 xfade 与 V2+ alpha 转场，V2+ 音频与
+  主轨混音；轨道头支持 M/S/L；由 `timeline_compose` 合成；“预览成片”按
+  草稿渲染 480p 时间线预览并连续播放。
 - **独立导出/转码**：不进入 EditIR 的 `TranscodeService`，支持 mp4/mov/mkv
   以及音频容器 mp3/m4a/wav/flac，H.264/HEVC/AV1/ProRes、码率/分辨率/帧率/
   像素格式、多音轨、软字幕、元数据；API 与桌面“导出 / 转码…”均可调用。

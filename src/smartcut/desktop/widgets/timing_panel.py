@@ -29,7 +29,10 @@ from PySide6.QtWidgets import (
 )
 
 from smartcut.contracts.time import RationalTime, seconds_from_mapping
-from smartcut.contracts.timeline_ops import TRANSITION_TYPES
+from smartcut.contracts.timeline_ops import (
+    TRANSITION_AUDIO_CURVES,
+    TRANSITION_TYPES,
+)
 
 _COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _POSITIONS = [
@@ -96,14 +99,15 @@ class TimingPanel(QWidget):
 
         transition_group = QGroupBox("片段转场")
         transition_layout = QVBoxLayout(transition_group)
-        self.transition_table = QTableWidget(0, 3)
+        self.transition_table = QTableWidget(0, 4)
         self.transition_table.setHorizontalHeaderLabels(
-            ["片段", "类型", "时长(s，0=无)"]
+            ["片段", "类型", "时长(s，0=无)", "音频曲线"]
         )
         header = self.transition_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.transition_table.verticalHeader().setVisible(False)
         self.transition_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -260,6 +264,11 @@ class TimingPanel(QWidget):
                     "after": row["after"],
                     "type": row["type"].currentData(),
                     "duration": _to_rational(duration),
+                    "audio_curve": (
+                        row["audio_curve"].currentData()
+                        if "audio_curve" in row
+                        else "tri"
+                    ),
                 }
             )
         overlays: list[dict] = []
@@ -384,8 +393,21 @@ class TimingPanel(QWidget):
             spin.setValue(_to_seconds(spec.get("duration")))
             spin.valueChanged.connect(lambda _value: self._emit())
             self.transition_table.setCellWidget(row, 2, spin)
+            curve = QComboBox()
+            for value in TRANSITION_AUDIO_CURVES:
+                curve.addItem(value, value)
+            curve.setCurrentIndex(
+                max(0, curve.findData(spec.get("audio_curve") or "tri"))
+            )
+            curve.currentIndexChanged.connect(lambda _index: self._emit())
+            self.transition_table.setCellWidget(row, 3, curve)
             self._transition_rows.append(
-                {"after": after, "type": combo, "duration": spin}
+                {
+                    "after": after,
+                    "type": combo,
+                    "duration": spin,
+                    "audio_curve": curve,
+                }
             )
         self.transition_table.blockSignals(False)
 

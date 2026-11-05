@@ -18,12 +18,54 @@ _TRANSITIONS = (
     "fade",
     "fadeblack",
     "fadewhite",
+    "fadegrays",
+    "dissolve",
     "wipeleft",
     "wiperight",
+    "wipetl",
+    "wipetr",
+    "wipebl",
+    "wipebr",
     "slideleft",
     "slideright",
+    "slideup",
+    "slidedown",
+    "smoothleft",
+    "smoothright",
+    "smoothup",
+    "smoothdown",
     "circleopen",
-    "dissolve",
+    "circleclose",
+    "circlecrop",
+    "rectcrop",
+    "radial",
+    "pixelize",
+    "hlslice",
+    "hrslice",
+    "vuslice",
+    "vdslice",
+    "hblur",
+    "squeezeh",
+    "squeezev",
+    "zoomin",
+    "vertopen",
+    "vertclose",
+    "horzopen",
+    "horzclose",
+)
+TRANSITION_AUDIO_CURVES = (
+    "tri",
+    "qsin",
+    "esin",
+    "hsin",
+    "log",
+    "ipar",
+    "qua",
+    "cub",
+    "squ",
+    "par",
+    "exp",
+    "nofade",
 )
 
 
@@ -41,14 +83,56 @@ class TransitionSpec(BaseModel):
         "fade",
         "fadeblack",
         "fadewhite",
+        "fadegrays",
+        "dissolve",
         "wipeleft",
         "wiperight",
+        "wipetl",
+        "wipetr",
+        "wipebl",
+        "wipebr",
         "slideleft",
         "slideright",
+        "slideup",
+        "slidedown",
+        "smoothleft",
+        "smoothright",
+        "smoothup",
+        "smoothdown",
         "circleopen",
-        "dissolve",
+        "circleclose",
+        "circlecrop",
+        "rectcrop",
+        "radial",
+        "pixelize",
+        "hlslice",
+        "hrslice",
+        "vuslice",
+        "vdslice",
+        "hblur",
+        "squeezeh",
+        "squeezev",
+        "zoomin",
+        "vertopen",
+        "vertclose",
+        "horzopen",
+        "horzclose",
     ] = "fade"
     duration: RationalTime
+    audio_curve: Literal[
+        "tri",
+        "qsin",
+        "esin",
+        "hsin",
+        "log",
+        "ipar",
+        "qua",
+        "cub",
+        "squ",
+        "par",
+        "exp",
+        "nofade",
+    ] = "tri"
 
     @model_validator(mode="after")
     def _positive(self) -> "TransitionSpec":
@@ -129,4 +213,44 @@ class WatermarkRemovalSpec(BaseModel):
         return self
 
 
+class PipClip(BaseModel):
+    """画中画/叠加视频轨：在 timeline_start 起叠加到主轨。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: SafeId
+    src: str = Field(min_length=1)
+    source_start: RationalTime
+    source_end: RationalTime
+    timeline_start: RationalTime
+    duration: RationalTime
+    x: float = Field(default=0.68, ge=0.0, le=1.0)
+    y: float = Field(default=0.05, ge=0.0, le=1.0)
+    width: float = Field(default=0.28, gt=0.0, le=1.0)
+    height: float = Field(default=0.28, gt=0.0, le=1.0)
+    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+    z: int = Field(default=0, ge=-16, le=16)
+
+    @model_validator(mode="after")
+    def _window(self) -> "PipClip":
+        if self.source_end <= self.source_start:
+            raise ValueError("PipClip.source_end 必须大于 source_start")
+        if self.timeline_start.as_fraction() < 0:
+            raise ValueError("PipClip.timeline_start 不能为负")
+        if self.duration.as_fraction() <= 0:
+            raise ValueError("PipClip.duration 必须大于 0")
+        if self.x + self.width > 1.0 + 1e-6 or self.y + self.height > 1.0 + 1e-6:
+            raise ValueError("PipClip 位置/尺寸超出画布")
+        return self
+
+
 TRANSITION_TYPES = _TRANSITIONS
+__all__ = [
+    "OverlaySpec",
+    "PipClip",
+    "TRANSITION_AUDIO_CURVES",
+    "TRANSITION_TYPES",
+    "TransitionSpec",
+    "WatermarkRemovalSpec",
+    "zero_time",
+]

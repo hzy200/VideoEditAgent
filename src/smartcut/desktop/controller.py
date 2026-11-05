@@ -181,6 +181,9 @@ class DesktopController(QObject):
                 return
             self.asset_changed.emit(result)
             self.open_project(result["project_id"])
+        elif op == "add_media_asset":
+            if result.get("project_id") == current:
+                self.open_project(result["project_id"])
         elif op == "import_audio":
             if result.get("project_id") == current:
                 self.refresh_audio_assets()
@@ -333,6 +336,15 @@ class DesktopController(QObject):
         self._current_project = project_id
 
         def load_bundle() -> dict:
+            # 导入/替换视频后自动生成可编辑的“全片单段”基线。
+            try:
+                self.services.ensure_baseline_revision(project_id)
+            except Exception as exc:
+                self.logger.warning(
+                    "baseline_revision_failed",
+                    project_id=project_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
             # 独立查询并行执行；SQLite WAL + 只读事务允许并发读取。
             with ThreadPoolExecutor(max_workers=4, thread_name_prefix="bundle") as pool:
                 f_project = pool.submit(self.services.get_project, project_id)
@@ -771,6 +783,30 @@ class DesktopController(QObject):
 
         self._run("media_import", call)
 
+    def understand_video(self, question: str) -> None:
+        pid = self._require_project()
+        if not pid:
+            return
+        self._submit_job(
+            "understand",
+            pid,
+            lambda reporter: self.services.understand_video(
+                pid, question, reporter
+            ),
+        )
+
+    def add_media_asset(self, path: str) -> None:
+        pid = self._require_project()
+        if not pid:
+            return
+
+        def call() -> dict:
+            result = self.services.add_media_asset(pid, path)
+            result["project_id"] = pid
+            return result
+
+        self._run("add_media_asset", call)
+
     def diagnose_media(self, src: str | None = None) -> None:
         pid = self._require_project()
         if not pid:
@@ -1064,6 +1100,11 @@ class DesktopController(QObject):
                     if job["status"] == "succeeded" and is_current:
                         self.operation_done.emit(
                             "media_ops", job.get("result") or {}
+                        )
+                elif kind == "understand":
+                    if job["status"] == "succeeded" and is_current:
+                        self.operation_done.emit(
+                            "understand", job.get("result") or {}
                         )
                 elif kind == "separate":
                     if job["status"] == "succeeded":

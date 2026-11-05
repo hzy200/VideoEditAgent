@@ -51,6 +51,10 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
 # 媒体修复 / 转换 / 音频容器 / 意图路由
 python -m pytest -q tests/test_media_ops_contracts.py tests/test_media_repair_tool.py tests/test_media_diagnostics.py tests/test_media_intent.py tests/test_media_tools_service.py tests/test_api_media.py
 QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_media_tools_gui.py tests/test_media_tools_panel.py tests/test_repair_dialog.py
+
+# 正常路径 GUI 可用性探针（生产 MainWindow/Controller/Services）
+python scripts/gui_usability_probe.py
+SMARTCUT_PROBE_OFFSCREEN=1 python scripts/gui_usability_probe.py
 ```
 
 - Python 3.12（不使用 3.14，避开 OpenTimelineIO binding 问题）。
@@ -171,8 +175,17 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_media_tools_gui.py test
   直方图；每线程独立 context，失败必须回退 CPU 并记录 `backend=cpu`。
 - M2 视图（帧差/光流条带/bbox/ROI/codecview）只作候选证据；codecview 不承诺
   数值级运动向量；ROI 必须回原素材取高分辨率，UI 证据叠层不得写 IR。
-- 未保存时间线在切换项目或退出前必须确认；保存完成后再执行原动作。
+- 未保存时间线在切换项目/版本或退出前必须确认；保存完成后再执行原动作。
+- 导入素材后必须立即加载源文件预览并显示时长，代理只在后台生成、就绪后
+  再切换；不得让用户等待整段代理才能播放。
+- 视频素材打开项目时必须幂等生成“全片单段”基线 revision，使时间线可立即
+  手动分割/裁剪/删除；替换素材后基线必须对应当前 src。
+- 版本下拉必须经 `DesktopController.load_revision` 切换，并遵守未保存确认；
+  异步保存期间的新编辑不得被误标为已保存。
 - 窗口布局/最近项目等 UI 状态只能写 `desktop.json`；不得写进项目工作区。
+- 主题色只能来自 `desktop/theme.py`；QWidget 不得内联写死主题色，统一用
+  objectName 语义样式与 `primaryButton`/`dangerButton` 变体；时间线/曲线/
+  证据画布固定使用 `theme.NLE` 深色调色板。
 - 桌面任务进度只用 Qt 信号；SSE 仅供可选服务端，WebSocket 未实现。
 - 手动字幕必须写入 `EditIR.subtitles`（输出时间线）：`None`=自动、
   `[]`=明确无字幕、非空=手动覆盖；不得只存在 GUI 内存中。
@@ -208,6 +221,34 @@ QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_media_tools_gui.py test
   其他源时静默改回项目主素材。`/media/operation` 一键工作流使用 Job `media_ops`。
 - 媒体工具长任务必须走 Job（`media_repair`/`transcode`），GUI 只经
   `DesktopController`；后台回调不得弹模态框。
+- “仅理解视频”任务必须走 `Services.understand_video`：只读转写/章节/媒体
+  事实并输出文字，不得创建 revision、渲染或修改时间线；LLM 失败回退规则总结。
+- 多素材 bin 只能追加 `media_assets`，不得替换主素材；主素材由 `is_primary`
+  唯一标记，感知/转写/代理仍只针对主素材。
+- 多源时间线必须在 `EditIR.source_facts` 记录副素材 facts，Compiler 每个
+  `TrimOp` 使用自己的 `op.src`；多源只允许 reencode 且所有素材必须有音轨。
+- 时间线拖动/裁剪必须支持磁性吸附（播放头/片段边界/镜头/质量/证据/音轨），
+  Alt 临时禁用；转场只能在相邻片段边界通过拖拽创建/调整/删除。
+- 画中画必须走 `pip_overlay` 工具：主轨保持原时长，PiP 只按时间窗叠加；
+  禁止在 renderer/Compiler 里静默拼 filtergraph，禁止 PiP 改变主轨顺序。
+- 多源混合分辨率/fps/无音轨时，每个 clip 必须先归一化到主素材画布/fps，
+  无音轨 clip 用 `anullsrc` 补静音并统一 48k 双声道；不得让 concat 直接失败。
+- 桌面时间线必须按输出时间绘制与命中：片段累计时长、转场重叠、裁剪/删除
+  ripple；seek 必须从输出时间映射回当前片段源时间，不得把输出 x 当源时间。
+- “预览成片”必须走完整 lower + 480p 渲染并缓存；多片段/多源/转场/画中画
+  不得回退到单源代理冒充时间线预览。
+- 绝对时间线必须给每个 `TrimOp.timeline_start`；同轨片段不得重叠，跨轨允许；
+  Compiler 必须走 `timeline_compose`，不得把绝对定位压回 sequence 顺序。
+- 绝对时间线 V1 转场必须连续（含重叠），先用 `compose` 生成主轨，再由
+  `timeline_compose` 以 base 叠加 V2+；V2+ 转场由 `timeline_compose` 用
+  alpha fade 表达；copy 模式禁用。
+- 画中画关键帧必须写入 `TrimOp.keyframes`，由 `timeline_compose` 生成
+  scale/overlay/alpha 表达式；不得只存在 GUI 内存或只渲染静态 transform。
+- V2+ 音频必须与 base 主轨 `amix`；轨道 muted/solo 必须在 Compiler 过滤，
+  不能只改 GUI 显示。
+- 多视频轨必须由 `TrimOp.track/transform` 表达；时间线按 track 绘制泳道，
+  拖入不同泳道/编辑 transform 才能生成叠加，不得只在渲染器里硬编码 PiP。
+- PiP 预览框拖拽/缩放必须写回 `PipClip`/track transform 并进入统一撤销栈。
 - 工具审计必须批量写（当前 20 条/批），任务结束/失败/取消时 flush。
 - 时间线编辑只在 GUI 本地 segment 列表中进行；不得在 QWidget 内调用 Services。
 - 所有编辑操作必须走 Undo/Redo 快照；保存为 revision 前不得写后端。

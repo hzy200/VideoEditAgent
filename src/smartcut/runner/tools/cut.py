@@ -27,12 +27,17 @@ class CutArgs(BaseModel):
     audio_bitrate: str = "192k"
     video_track_timescale: int = Field(default=90_000, gt=0)
     fps_mode: Literal["cfr", "vfr", "passthrough"] = "passthrough"
+    fps: str | None = Field(default=None, max_length=32)
     encoder: EncoderProfile | None = None
     # 逐片段特效（L2）使用；只接受 Compiler 生成的白名单滤镜。
     video_filters: list[str] = Field(default_factory=list)
     # 变速：输出时长 = 源区间时长 / speed；atempo 支持 0.5–2.0。
     speed: float = Field(default=1.0, ge=0.5, le=2.0, allow_inf_nan=False)
     has_audio: bool = True
+    # 多源拼接时为无音轨素材生成静音，并统一采样率/声道。
+    ensure_audio: bool = False
+    audio_sample_rate: int | None = Field(default=None, ge=8000, le=192000)
+    audio_channels: int | None = Field(default=None, ge=1, le=8)
 
     @model_validator(mode="after")
     def _ordered(self) -> "CutArgs":
@@ -66,7 +71,22 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
         argv.extend(["-t", duration, "-i", str(src)])
     else:
         argv.extend(["-i", str(src), "-t", duration])
-    argv.extend(["-map", "0:v:0", "-map", "0:a:0?"])
+    silent_audio = (
+        not args.has_audio and args.ensure_audio and args.mode != "copy"
+    )
+    if silent_audio:
+        rate = args.audio_sample_rate or 48000
+        channels = args.audio_channels or 2
+        argv.extend(
+            [
+                "-f",
+                "lavfi",
+                "-i",
+                f"anullsrc=r={rate}:cl={'stereo' if channels == 2 else 'mono'}",
+            ]
+        )
+    argv.extend(["-map", "0:v:0"])
+    argv.extend(["-map", "1:a:0" if silent_audio else "0:a:0?"])
 
     video_filters = list(args.video_filters)
     if retimed:
@@ -100,6 +120,8 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
                     str(args.crf),
                 ]
             )
+        if args.fps:
+            argv.extend(["-r", args.fps])
         if args.fps_mode != "passthrough":
             argv.extend(["-fps_mode", args.fps_mode])
         argv.extend(
@@ -112,9 +134,14 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
                 args.audio_codec,
                 "-b:a",
                 args.audio_bitrate,
-                "-movflags",
-                "+faststart",
             ]
         )
+        if args.audio_sample_rate:
+            argv.extend(["-ar", str(args.audio_sample_rate)])
+        if args.audio_channels:
+            argv.extend(["-ac", str(args.audio_channels)])
+        if silent_audio:
+            argv.append("-shortest")
+        argv.extend(["-movflags", "+faststart"])
     argv.append(str(dst))
     return argv

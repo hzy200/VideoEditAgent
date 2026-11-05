@@ -407,10 +407,15 @@ class ServiceBase:
 
     @staticmethod
     def _latest_asset(session, project_id: str) -> MediaAsset | None:
+        """返回主素材；旧库/异常情况下回退到最近一条素材。"""
         return session.scalars(
             select(MediaAsset)
             .where(MediaAsset.project_id == project_id)
-            .order_by(MediaAsset.created_at.desc(), MediaAsset.id.desc())
+            .order_by(
+                MediaAsset.is_primary.desc(),
+                MediaAsset.created_at.desc(),
+                MediaAsset.id.desc(),
+            )
             .limit(1)
         ).first()
 
@@ -608,11 +613,15 @@ class ServiceBase:
     def _asset_dict(asset: MediaAsset | None) -> dict | None:
         if asset is None:
             return None
+        facts = json.loads(asset.facts_json)
         return {
             "id": asset.id,
             "src": asset.src,
+            "name": Path(asset.src).stem,
+            "kind": "video" if facts.get("video") else "audio",
+            "is_primary": bool(getattr(asset, "is_primary", False)),
             "source_hash": getattr(asset, "source_hash", None),
-            "facts": json.loads(asset.facts_json),
+            "facts": facts,
             "transcript": json.loads(asset.transcript_json) if asset.transcript_json else None,
             "created_at": _iso(asset.created_at),
         }

@@ -26,6 +26,8 @@ ToolName = Literal[
     "mix_audio",
     "transcode",
     "media_repair",
+    "pip_overlay",
+    "timeline_compose",
     "loudnorm_measure",
 ]
 

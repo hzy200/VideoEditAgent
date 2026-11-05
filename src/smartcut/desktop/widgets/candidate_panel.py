@@ -51,7 +51,7 @@ class CandidatePanel(QWidget):
         layout.addLayout(row)
 
         self.status = QLabel("尚未检索候选")
-        self.status.setStyleSheet("color:#64748b;")
+        self.status.setObjectName("mutedText")
         layout.addWidget(self.status)
 
         self.table = QTableWidget(0, 7)

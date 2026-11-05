@@ -25,6 +25,7 @@ from smartcut.desktop.presets import SCENE_PRESETS
 
 class AIPanel(QWidget):
     run_requested = Signal(str, bool, bool)
+    understand_requested = Signal(str)
     media_goal_requested = Signal(str)
     cancel_requested = Signal()
     review_requested = Signal()
@@ -54,6 +55,12 @@ class AIPanel(QWidget):
 
         self.only_analysis = QCheckBox("只分析（不渲染）")
         layout.addWidget(self.only_analysis)
+        self.understand_only = QCheckBox("仅理解并回答（不改时间线）")
+        self.understand_only.setToolTip(
+            "转写/章节/媒体事实 → 文字回答；不会生成 revision、渲染或修改时间线。"
+        )
+        self.understand_only.toggled.connect(self._on_understand_toggled)
+        layout.addWidget(self.understand_only)
         self.outline_first = QCheckBox("先生成大纲（人工确认后继续）")
         layout.addWidget(self.outline_first)
         self.fast_outline = QCheckBox("快速大纲（跳过质量/人脸/完整转写）")
@@ -106,7 +113,7 @@ class AIPanel(QWidget):
         self.progress.setValue(0)
         layout.addWidget(self.progress)
         self.status_label = QLabel("空闲")
-        self.status_label.setStyleSheet("color:#64748b;")
+        self.status_label.setObjectName("mutedText")
         layout.addWidget(self.status_label)
 
         layout.addWidget(QLabel("最终决策答案"))
@@ -219,10 +226,27 @@ class AIPanel(QWidget):
         self.fast_outline.setChecked(preset.phase == "fast_outline")
         self.audio_first.setChecked(preset.phase == "audio_first")
 
+    def _on_understand_toggled(self, checked: bool) -> None:
+        self.run_button.setText("理解并回答" if checked else "运行 Orchestrator")
+
+    def set_understanding(self, result: dict) -> None:
+        self.progress.setValue(100)
+        self.status_label.setText(
+            "理解完成 · LLM"
+            if result.get("llm_used")
+            else "理解完成 · 规则总结"
+        )
+        self.answer.setPlainText(str(result.get("answer") or ""))
+        self.cancel_button.setEnabled(False)
+        self.run_button.setEnabled(True)
+
     def _emit_media(self) -> None:
         self.media_goal_requested.emit(self.goal_text())
 
     def _emit_run(self) -> None:
+        if self.understand_only.isChecked():
+            self.understand_requested.emit(self.goal_text())
+            return
         extras: list[str] = []
         if self.vertical.isChecked():
             extras.append("输出 9:16 竖版")

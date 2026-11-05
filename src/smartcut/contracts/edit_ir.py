@@ -23,6 +23,7 @@ from smartcut.contracts.media import MediaFacts
 from smartcut.contracts.time import RationalTime
 from smartcut.contracts.timeline_ops import (
     OverlaySpec,
+    PipClip,
     TransitionSpec,
     WatermarkRemovalSpec,
 )
@@ -44,6 +45,49 @@ class TimeRange(BaseModel):
         return self.end - self.start
 
 
+class ClipTransform(BaseModel):
+    """叠加视频轨的画面变换；归一化到输出画布。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    x: float = Field(default=0.0, ge=0.0, le=1.0)
+    y: float = Field(default=0.0, ge=0.0, le=1.0)
+    width: float = Field(default=1.0, gt=0.0, le=1.0)
+    height: float = Field(default=1.0, gt=0.0, le=1.0)
+    opacity: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _bounds(self) -> "ClipTransform":
+        if self.x + self.width > 1.0 + 1e-6:
+            raise ValueError("ClipTransform 横向超出画布")
+        if self.y + self.height > 1.0 + 1e-6:
+            raise ValueError("ClipTransform 纵向超出画布")
+        return self
+
+
+class TransformKeyframe(BaseModel):
+    """画中画关键帧；t 为 clip 内相对时间。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    t: RationalTime
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    width: float = Field(gt=0.0, le=1.0)
+    height: float = Field(gt=0.0, le=1.0)
+    opacity: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _bounds(self) -> "TransformKeyframe":
+        if self.t.as_fraction() < 0:
+            raise ValueError("关键帧时间不能为负")
+        if self.x + self.width > 1.0 + 1e-6:
+            raise ValueError("关键帧横向超出画布")
+        if self.y + self.height > 1.0 + 1e-6:
+            raise ValueError("关键帧纵向超出画布")
+        return self
+
+
 class TrimOp(BaseModel):
     """从同一素材保留一个源区间。源时间由用户/模型给出，输出时间由编译器推导。
 
@@ -58,6 +102,11 @@ class TrimOp(BaseModel):
     range: TimeRange
     # 1.0=原速；0.5=半速；2.0=两倍速。改变输出时长，因此属于时间轴算子。
     speed: float = Field(default=1.0, ge=0.5, le=2.0, allow_inf_nan=False)
+    # 绝对输出时间；None=旧 sequence 顺序模式。非 None 时允许空隙/多轨。
+    timeline_start: RationalTime | None = None
+    track: int = Field(default=0, ge=0, le=15)
+    transform: ClipTransform | None = None
+    keyframes: list[TransformKeyframe] = Field(default_factory=list)
     tag: str | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     # 规则/LLM 给出的短理由；仅供解释与审片展示，不参与编译。
@@ -133,6 +182,16 @@ class ExportSpec(BaseModel):
     fps: str | None = None
 
 
+class TrackState(BaseModel):
+    """视频轨控制：静音(隐藏)/独奏/锁定编辑。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    muted: bool = False
+    solo: bool = False
+    locked: bool = False
+
+
 class EditIR(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
@@ -140,30 +199,53 @@ class EditIR(BaseModel):
     project_id: SafeId
     revision: int = Field(default=0, ge=0)
     media_facts: MediaFacts
+    # 多素材时间线：主素材之外的源 facts；键为 workspace 相对 src。
+    source_facts: dict[str, MediaFacts] = Field(default_factory=dict)
     sequence: list[TrimOp] = Field(min_length=1)
     effects: list[Effect] = Field(default_factory=list)
     transitions: list[TransitionSpec] = Field(default_factory=list)
     overlays: list[OverlaySpec] = Field(default_factory=list)
     removals: list[WatermarkRemovalSpec] = Field(default_factory=list)
+    # 画中画/叠加视频轨；只作输出叠加，不改变主轨顺序与总时长。
+    pips: list[PipClip] = Field(default_factory=list)
+    track_states: dict[int, TrackState] = Field(default_factory=dict)
     audio: AudioSpec = Field(default_factory=AudioSpec)
     # 手动字幕使用输出时间线；None=自动生成，[]=明确无字幕，非空=手动覆盖。
     subtitles: list[CaptionCue] | None = None
     export: ExportSpec = Field(default_factory=ExportSpec)
 
     @model_validator(mode="after")
-    def _single_source(self) -> "EditIR":
+    def _known_sources(self) -> "EditIR":
+        known = {self.media_facts.src, *self.source_facts}
         for index, op in enumerate(self.sequence):
-            if op.src != self.media_facts.src:
+            if op.src not in known:
                 raise ValueError(
-                    f"sequence[{index}].src={op.src!r} 与 media_facts.src={self.media_facts.src!r} 不一致"
+                    f"sequence[{index}].src={op.src!r} 不在媒体事实中"
+                )
+        for index, pip in enumerate(self.pips):
+            if pip.src not in known:
+                raise ValueError(
+                    f"pips[{index}].src={pip.src!r} 不在媒体事实中"
                 )
         ids = [op.id for op in self.sequence if op.id]
         if len(ids) != len(set(ids)):
             raise ValueError("sequence 内的 trim id 必须唯一")
         return self
 
+    def absolute_timeline(self) -> bool:
+        return any(op.timeline_start is not None for op in self.sequence)
+
     def total_duration(self) -> RationalTime:
         # 统一时基 90000；时间轴运算本身仍走 Fraction。
+        if self.absolute_timeline():
+            ends = [
+                op.timeline_start.as_fraction() + op.output_duration().as_fraction()
+                for op in self.sequence
+                if op.timeline_start is not None
+            ]
+            return RationalTime.from_fraction(max(ends, default=Fraction(0))).round_to_rate(
+                90_000
+            )
         total = sum(
             (op.output_duration().as_fraction() for op in self.sequence),
             Fraction(0),

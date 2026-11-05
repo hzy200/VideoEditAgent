@@ -36,7 +36,7 @@ class PerceptionPanel(QWidget):
         self.sheet = QLabel("暂无 contact sheet")
         self.sheet.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.sheet.setMinimumHeight(240)
-        self.sheet.setStyleSheet("background:#0f172a; color:#94a3b8; border-radius:6px;")
+        self.sheet.setObjectName("mediaCanvas")
         layout.addWidget(self.sheet, 2)
         layout.addWidget(QLabel("章节关键帧（点击跳转预览）"))
         self.keyframes = QListWidget()

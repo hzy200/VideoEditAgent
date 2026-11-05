@@ -23,7 +23,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utcnow() -> datetime:
@@ -52,6 +52,9 @@ class MediaAsset(Base):
     facts_json: Mapped[str] = mapped_column(Text)
     transcript_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    is_primary: Mapped[bool] = mapped_column(
+        Boolean, default=False, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
@@ -267,6 +270,29 @@ def _migration_v4(conn: Connection) -> None:
     _add_column(conn, "edit_feedback", "source_hash", "source_hash VARCHAR(64)")
 
 
+def _migration_v5(conn: Connection) -> None:
+    _add_column(
+        conn,
+        "media_assets",
+        "is_primary",
+        "is_primary BOOLEAN NOT NULL DEFAULT 0",
+    )
+    # 旧库每个项目保留最近一条素材为主素材。
+    rows = conn.exec_driver_sql(
+        "SELECT project_id, id FROM media_assets "
+        "ORDER BY project_id, created_at DESC, id DESC"
+    ).fetchall()
+    seen: set[str] = set()
+    for project_id, asset_id in rows:
+        if project_id in seen:
+            continue
+        seen.add(project_id)
+        conn.exec_driver_sql(
+            "UPDATE media_assets SET is_primary = 1 WHERE id = ?",
+            (asset_id,),
+        )
+
+
 def _ensure_indexes(conn: Connection) -> None:
     # create_all 不会为已存在的旧表补索引；每次 init 幂等补齐。
     conn.exec_driver_sql(
@@ -284,6 +310,7 @@ MIGRATIONS: tuple[tuple[int, Callable[[Connection], None]], ...] = (
     (2, _migration_v2),
     (3, _migration_v3),
     (4, _migration_v4),
+    (5, _migration_v5),
 )
 
 

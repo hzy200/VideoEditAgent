@@ -307,8 +307,10 @@ class RenderMixin:
         height -= height % 2
         warnings: list[str] = []
 
-        has_timeline_ops = bool(ir.transitions or ir.overlays) or any(
-            op.speed != 1.0 for op in ir.sequence
+        has_timeline_ops = (
+            bool(ir.transitions or ir.overlays or ir.pips or ir.source_facts)
+            or len(ir.sequence) > 1
+            or any(op.speed != 1.0 for op in ir.sequence)
         )
         if not enabled_output_effects(ir.effects) and not has_timeline_ops:
             proxy = workspace.proxy_dir / "preview.mp4"

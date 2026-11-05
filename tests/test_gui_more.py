@@ -69,11 +69,11 @@ def test_theme_dark_light_palette(app) -> None:
     original_palette = app.palette()
     try:
         apply_theme(app, "dark", scale=1.0)
-        assert app.palette().color(QPalette.ColorRole.Window).name() == "#0b0f16"
-        assert "#3b82f6" in app.styleSheet()
+        assert app.palette().color(QPalette.ColorRole.Window).name() == "#0a0e15"
+        assert "#38bdf8" in app.styleSheet()
         apply_theme(app, "light", scale=1.0)
-        assert app.palette().color(QPalette.ColorRole.Window).name() == "#eef2f7"
-        assert app.palette().color(QPalette.ColorRole.Base).name() == "#fbfcfe"
+        assert app.palette().color(QPalette.ColorRole.Window).name() == "#eef2f8"
+        assert app.palette().color(QPalette.ColorRole.Base).name() == "#fbfdff"
     finally:
         app.setFont(original_font)
         app.setStyleSheet(original_style)

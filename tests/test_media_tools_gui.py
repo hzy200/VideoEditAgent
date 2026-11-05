@@ -56,6 +56,11 @@ def test_main_window_media_buttons_route_to_controller(
         lambda path: calls.append(("import", path)),
     )
     monkeypatch.setattr(
+        controller,
+        "understand_video",
+        lambda question: calls.append(("understand", question)),
+    )
+    monkeypatch.setattr(
         QFileDialog,
         "getOpenFileName",
         staticmethod(lambda *args, **kwargs: ("C:/tmp/broken.mp4", "")),
@@ -112,6 +117,38 @@ def test_main_window_media_buttons_route_to_controller(
             == "media/broken.mp4"
         )
 
+        previews: list[tuple[str, str]] = []
+        monkeypatch.setattr(
+            window.preview_panel,
+            "load_media",
+            lambda path, mode="": previews.append((str(path), mode)),
+        )
+        source = tmp_path / "source.mp4"
+        source.write_bytes(b"x")
+        window.current_project = {
+            "id": "p_demo",
+            "workspace_dir": str(tmp_path),
+            "asset": {"src": "source.mp4"},
+        }
+        window._showing_output = False
+        window._load_source_preview(window.current_project)
+        assert previews and "源文件预览" in previews[-1][1]
+
+        loaded: list[int] = []
+        monkeypatch.setattr(
+            controller, "load_revision", lambda number: loaded.append(number)
+        )
+        window.current_ir = {"revision": 1}
+        window.unsaved = False
+        window.inspector_panel.set_revisions(
+            [{"revision": 0}, {"revision": 1}]
+        )
+        window.inspector_panel.select_revision(1)
+        window.inspector_panel.revision_combo.setCurrentIndex(
+            window.inspector_panel.revision_combo.findData(0)
+        )
+        assert loaded == [0]
+
         calls.clear()
         window.media_tools_panel.diagnose_button.click()
         window.media_tools_panel.set_project_enabled(True)
@@ -134,6 +171,37 @@ def test_main_window_media_buttons_route_to_controller(
         calls.clear()
         window._on_media_plan_ready({"operation": "convert"})
         assert [call[0] for call in calls] == ["transcode"]
+
+        window.current_ir = {"revision": 1}
+        window.timeline_panel.set_position(0.0)
+        window._on_add_pip(
+            {
+                "src": "media/source.mp4",
+                "name": "source",
+                "facts": {
+                    "duration": {"value": 90_000, "rate": 90_000}
+                },
+            }
+        )
+        pip_segments = [
+            segment
+            for segment in window.timeline_panel.segments()
+            if int(segment.get("track") or 0) > 0
+        ]
+        assert len(pip_segments) == 1
+        assert pip_segments[0]["src"] == "media/source.mp4"
+
+        calls.clear()
+        window.ai_panel.set_project_enabled(True)
+        window.ai_panel.goal_edit.setPlainText("总结视频内容")
+        window.ai_panel.understand_only.setChecked(True)
+        window.ai_panel.run_button.click()
+        assert calls == [("understand", "总结视频内容")]
+        assert window.ai_panel.run_button.text() == "理解并回答"
+        window.ai_panel.set_understanding(
+            {"answer": "规则回答", "llm_used": False}
+        )
+        assert "规则回答" in window.ai_panel.answer.toPlainText()
     finally:
         window.close()
         app.processEvents()

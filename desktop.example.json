@@ -1,6 +1,6 @@
 {
   "deepseek_base_url": "https://api.deepseek.com",
-  "deepseek_model": "deepseek-chat",
+  "deepseek_model": "deepseek-flash",
   "whisper_model": "base",
   "orchestrator_max_parallel": 4,
   "orchestrator_use_llm": true,

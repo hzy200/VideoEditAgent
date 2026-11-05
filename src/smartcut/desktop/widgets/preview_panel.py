@@ -2,17 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QSlider,
     QStyle,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+from smartcut.desktop.theme import apply_standard_icon
 
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -26,11 +29,117 @@ except Exception:  # pragma: no cover - 取决于打包环境
     MEDIA_AVAILABLE = False
 
 
+class PipBoxOverlay(QWidget):
+    """预览区画中画框选：拖动移动，右下角手柄缩放。"""
+
+    pip_changed = Signal(str, object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.pips: list[dict] = []
+        self.selected = -1
+        self._drag: dict | None = None
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self.setStyleSheet("background:transparent;")
+        self.setMouseTracking(True)
+
+    def set_pips(self, pips: list[dict] | None) -> None:
+        self.pips = [dict(item) for item in pips or []]
+        if self.selected >= len(self.pips):
+            self.selected = -1
+        self.update()
+
+    def _rect(self, pip: dict) -> QRectF:
+        return QRectF(
+            float(pip.get("x", 0.0)) * self.width(),
+            float(pip.get("y", 0.0)) * self.height(),
+            max(12.0, float(pip.get("width", 1.0)) * self.width()),
+            max(12.0, float(pip.get("height", 1.0)) * self.height()),
+        )
+
+    def paintEvent(self, _event) -> None:
+        if not self.pips:
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for index, pip in enumerate(self.pips):
+            rect = self._rect(pip)
+            selected = index == self.selected
+            painter.setPen(
+                QPen(QColor("#22d3ee"), 2 if selected else 1, Qt.PenStyle.DashLine)
+            )
+            painter.setBrush(QColor(34, 211, 238, 24))
+            painter.drawRect(rect)
+            if selected:
+                painter.setBrush(QColor("#22d3ee"))
+                painter.drawRect(
+                    QRectF(rect.right() - 6, rect.bottom() - 6, 10, 10)
+                )
+
+    def mousePressEvent(self, event) -> None:
+        point = event.position()
+        for index in range(len(self.pips) - 1, -1, -1):
+            rect = self._rect(self.pips[index])
+            handle = QRectF(rect.right() - 8, rect.bottom() - 8, 12, 12)
+            if handle.contains(point):
+                self.selected = index
+                self._drag = {"index": index, "mode": "resize", "point": point}
+                self.update()
+                return
+            if rect.contains(point):
+                self.selected = index
+                self._drag = {"index": index, "mode": "move", "point": point}
+                self.update()
+                return
+        self.selected = -1
+        self._drag = None
+        self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag is None or not self.pips:
+            return
+        index = int(self._drag["index"])
+        if index >= len(self.pips):
+            return
+        pip = dict(self.pips[index])
+        dx = (event.position().x() - self._drag["point"].x()) / max(1, self.width())
+        dy = (event.position().y() - self._drag["point"].y()) / max(1, self.height())
+        if self._drag["mode"] == "move":
+            pip["x"] = min(max(0.0, float(pip.get("x", 0.0)) + dx), 1.0 - float(pip.get("width", 0.1)))
+            pip["y"] = min(max(0.0, float(pip.get("y", 0.0)) + dy), 1.0 - float(pip.get("height", 0.1)))
+        else:
+            pip["width"] = max(0.05, min(1.0 - float(pip.get("x", 0.0)), float(pip.get("width", 0.1)) + dx))
+            pip["height"] = max(0.05, min(1.0 - float(pip.get("y", 0.0)), float(pip.get("height", 0.1)) + dy))
+        self.pips[index] = pip
+        self._drag["point"] = event.position()
+        self.update()
+
+    def mouseReleaseEvent(self, _event) -> None:
+        if self._drag is None:
+            return
+        index = int(self._drag["index"])
+        self._drag = None
+        if 0 <= index < len(self.pips):
+            pip = self.pips[index]
+            self.pip_changed.emit(
+                str(pip.get("id") or ""),
+                {
+                    "x": float(pip.get("x", 0.0)),
+                    "y": float(pip.get("y", 0.0)),
+                    "width": float(pip.get("width", 1.0)),
+                    "height": float(pip.get("height", 1.0)),
+                    "opacity": float(pip.get("opacity", 1.0)),
+                },
+            )
+
+
 class PreviewPanel(QWidget):
     position_changed = Signal(float)
     playing_changed = Signal(bool)
     volume_changed = Signal(int)
     mute_changed = Signal(bool)
+    step_requested = Signal(int)
+    pip_changed = Signal(str, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -42,6 +151,8 @@ class PreviewPanel(QWidget):
         self._loop_end: float | None = None
         self._looping = False
         self._captions: list[dict] = []
+        # 记录预览模式切换，便于诊断“源文件→代理”是否发生。
+        self.mode_history: list[str] = []
         self._volume = 80
         self._muted = False
         self._caption_style = {
@@ -72,15 +183,31 @@ class PreviewPanel(QWidget):
             "padding:4px 10px; border-radius:4px;"
         )
         self.subtitle.hide()
+        self.pip_overlay = PipBoxOverlay(self.video_frame)
+        self.pip_overlay.pip_changed.connect(self.pip_changed.emit)
+        self.pip_overlay.hide()
         layout.addWidget(self.video_frame, 1)
 
         controls = QHBoxLayout()
-        controls.setSpacing(6)
-        self.stop_button = QPushButton("停止")
-        self.stop_button.setToolTip("停止并回到起点")
-        self.play_button = QPushButton("播放")
-        self.play_button.setToolTip("播放 / 暂停（空格）")
-        self.play_button.setMaximumWidth(96)
+        controls.setSpacing(5)
+
+        def transport_button(tooltip: str, size: QSize) -> QToolButton:
+            button = QToolButton()
+            button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonIconOnly
+            )
+            button.setIconSize(QSize(16, 16))
+            button.setFixedSize(size)
+            button.setToolTip(tooltip)
+            return button
+
+        self.prev_button = transport_button("上一帧（←）", QSize(30, 28))
+        self.play_button = transport_button(
+            "播放 / 暂停（空格）", QSize(34, 30)
+        )
+        self.play_button.setObjectName("transportPlay")
+        self.next_button = transport_button("下一帧（→）", QSize(30, 28))
+        self.stop_button = transport_button("停止并回到起点", QSize(30, 28))
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 0)
         self.mode_label = QLabel("")
@@ -90,36 +217,62 @@ class PreviewPanel(QWidget):
         self.time_label = QLabel("00:00.000 / 00:00.000")
         self.time_label.setObjectName("mutedText")
         self.time_label.setMinimumWidth(170)
-        self.mute_button = QPushButton("静音")
-        self.mute_button.setToolTip("静音 / 取消静音")
+        self.mute_button = transport_button("静音 / 取消静音", QSize(30, 28))
+        self.mute_button.setText("静音")
         self.volume_slider = QSlider(Qt.Orientation.Horizontal)
         self.volume_slider.setRange(0, 100)
         self.volume_slider.setValue(self._volume)
-        self.volume_slider.setFixedWidth(96)
+        self.volume_slider.setFixedWidth(88)
         self.volume_slider.setToolTip("预览监听音量")
-        controls.addWidget(self.stop_button)
+        controls.addWidget(self.prev_button)
         controls.addWidget(self.play_button)
+        controls.addWidget(self.next_button)
+        controls.addWidget(self.stop_button)
+        controls.addSpacing(4)
+        controls.addWidget(self.time_label)
         controls.addWidget(self.slider, 1)
         controls.addWidget(self.mode_label)
         controls.addWidget(self.loop_label)
-        controls.addWidget(self.time_label)
-        controls.addWidget(self.mute_button)
+        controls.addSpacing(4)
         controls.addWidget(self.volume_slider)
+        controls.addWidget(self.mute_button)
         layout.addLayout(controls)
 
         self._apply_button_icons()
+        self._set_transport_enabled(False)
         self.play_button.clicked.connect(self.toggle_play)
+        self.prev_button.clicked.connect(lambda: self.step_requested.emit(-1))
+        self.next_button.clicked.connect(lambda: self.step_requested.emit(1))
         self.stop_button.clicked.connect(self.stop)
         self.slider.sliderMoved.connect(self._on_slider_moved)
         self.mute_button.clicked.connect(self.toggle_mute)
         self.volume_slider.valueChanged.connect(self.set_volume)
 
+    def _set_transport_enabled(self, enabled: bool) -> None:
+        for button in (
+            self.prev_button,
+            self.play_button,
+            self.next_button,
+            self.stop_button,
+        ):
+            button.setEnabled(enabled)
+
     def _apply_button_icons(self) -> None:
-        self.play_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaPlay)
+        apply_standard_icon(
+            self.play_button, QStyle.StandardPixmap.SP_MediaPlay, 16
         )
-        self.stop_button.setIcon(
-            self.style().standardIcon(QStyle.StandardPixmap.SP_MediaStop)
+        apply_standard_icon(
+            self.prev_button,
+            QStyle.StandardPixmap.SP_MediaSkipBackward,
+            16,
+        )
+        apply_standard_icon(
+            self.next_button,
+            QStyle.StandardPixmap.SP_MediaSkipForward,
+            16,
+        )
+        apply_standard_icon(
+            self.stop_button, QStyle.StandardPixmap.SP_MediaStop, 16
         )
         self._update_volume_button()
 
@@ -129,7 +282,7 @@ class PreviewPanel(QWidget):
             if self._muted
             else QStyle.StandardPixmap.SP_MediaVolume
         )
-        self.mute_button.setIcon(self.style().standardIcon(icon))
+        apply_standard_icon(self.mute_button, icon, 16)
         self.mute_button.setText("已静音" if self._muted else "静音")
         self.mute_button.setToolTip("取消静音" if self._muted else "静音")
 
@@ -201,15 +354,33 @@ class PreviewPanel(QWidget):
             return
         self.player.setSource(QUrl.fromLocalFile(str(path)))
         self.player.pause()
+        self._set_transport_enabled(False)
+        self.slider.setRange(0, 0)
+        self.slider.setValue(0)
+        self.time_label.setText("加载中… / 00:00.000")
         self.mode_label.setText(mode)
+        self.mode_history.append(str(mode))
         self.placeholder.setText("")
+        self.placeholder.hide()
+        if self.video is not None:
+            self.video.show()
+
+    def is_playing(self) -> bool:
+        return (
+            self.player is not None
+            and self.player.playbackState()
+            == QMediaPlayer.PlaybackState.PlayingState
+        )
 
     def clear(self) -> None:
         if self.player is not None:
             self.player.stop()
             self.player.setSource(QUrl())
         self.slider.setRange(0, 0)
+        self._set_transport_enabled(False)
         self.mode_label.setText("")
+        self.pip_overlay.set_pips([])
+        self.pip_overlay.hide()
         self._clear_loop()
         self._captions = []
         self.subtitle.hide()
@@ -238,6 +409,15 @@ class PreviewPanel(QWidget):
         if self.player is not None:
             return self.player.position() / 1000.0
         return 0.0
+
+    def set_pips(self, pips: list[dict] | None) -> None:
+        self.pip_overlay.set_pips(pips)
+        if pips:
+            self.pip_overlay.setGeometry(self.video_frame.rect())
+            self.pip_overlay.show()
+            self.pip_overlay.raise_()
+        else:
+            self.pip_overlay.hide()
 
     def set_captions(self, captions: list[dict] | None) -> None:
         self._captions = list(captions or [])
@@ -293,6 +473,9 @@ class PreviewPanel(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        self.pip_overlay.setGeometry(self.video_frame.rect())
+        if self.pip_overlay.pips:
+            self.pip_overlay.raise_()
         self._layout_subtitle()
 
     def toggle_play(self) -> None:
@@ -358,6 +541,11 @@ class PreviewPanel(QWidget):
 
     def _on_duration(self, duration_ms: int) -> None:
         self.slider.setRange(0, duration_ms)
+        position = self.player.position() if self.player is not None else 0
+        self.time_label.setText(
+            f"{_format_ms(position)} / {_format_ms(duration_ms)}"
+        )
+        self._set_transport_enabled(duration_ms > 0)
 
     def _on_state(self, state) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
@@ -366,13 +554,16 @@ class PreviewPanel(QWidget):
             if playing
             else QStyle.StandardPixmap.SP_MediaPlay
         )
-        self.play_button.setIcon(self.style().standardIcon(icon))
+        apply_standard_icon(self.play_button, icon, 16)
         self.play_button.setText("暂停" if playing else "播放")
         self.playing_changed.emit(playing)
 
     def _on_error(self, _error, message: str) -> None:
         if message:
+            self._set_transport_enabled(False)
             self.placeholder.setText(f"播放失败: {message}")
+            self.placeholder.show()
+            self.mode_label.setText("预览错误")
 
 
 def _format_ms(value: int) -> str:

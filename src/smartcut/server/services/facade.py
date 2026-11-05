@@ -27,7 +27,7 @@ from smartcut.config import Settings
 from smartcut.contracts.audio import AudioAssetRef, AudioTrackSpec
 from smartcut.contracts.candidates import Candidate, CandidateList
 from smartcut.contracts.chapters import Chapter, ChapterPlan, OutlineApproval
-from smartcut.contracts.edit_ir import EditIR, assign_trim_ids
+from smartcut.contracts.edit_ir import EditIR, TimeRange, TrimOp, assign_trim_ids
 from smartcut.contracts.effects import Effect
 from smartcut.contracts.encoder import EncoderProfile
 from smartcut.contracts.faces import FaceReport
@@ -157,6 +157,7 @@ from smartcut.server.services.orchestration import OrchestrationMixin
 from smartcut.server.services.perception import PerceptionMixin
 from smartcut.server.services.rendering import RenderMixin
 from smartcut.server.services.screen_text import ScreenTextMixin
+from smartcut.server.services.understanding import UnderstandingMixin
 from smartcut.server.services.visual import VisualMixin
 
 
@@ -165,6 +166,7 @@ class Services(
     VisualMixin,
     RenderMixin,
     MediaToolsMixin,
+    UnderstandingMixin,
     ScreenTextMixin,
     PerceptionMixin,
     OrchestrationMixin,
@@ -228,6 +230,18 @@ class Services(
                 "workspace_dir": project.workspace_dir,
                 "created_at": _iso(project.created_at),
                 "asset": self._asset_dict(asset),
+                "assets": [
+                    self._asset_dict(item)
+                    for item in session.scalars(
+                        select(MediaAsset)
+                        .where(MediaAsset.project_id == project_id)
+                        .order_by(
+                            MediaAsset.is_primary.desc(),
+                            MediaAsset.created_at.asc(),
+                            MediaAsset.id.asc(),
+                        )
+                    ).all()
+                ],
                 "revisions": [
                     {"revision": item.revision_no, "created_at": _iso(item.created_at)}
                     for item in revisions
@@ -672,6 +686,65 @@ class Services(
             destination.unlink(missing_ok=True)
             raise
 
+    def list_media_assets(self, project_id: str) -> list[dict]:
+        self._require_project(project_id)
+        with self.db.session() as session:
+            rows = session.scalars(
+                select(MediaAsset)
+                .where(MediaAsset.project_id == project_id)
+                .order_by(
+                    MediaAsset.is_primary.desc(),
+                    MediaAsset.created_at.asc(),
+                    MediaAsset.id.asc(),
+                )
+            ).all()
+            return [self._asset_dict(item) for item in rows]
+
+    def add_media_asset(self, project_id: str, src: str) -> dict:
+        """追加一个素材到 bin，不改变主素材。"""
+        self._require_project(project_id)
+        workspace = self.workspaces.get(project_id)
+        source = Path(src).expanduser()
+        if not source.is_file():
+            raise ResourceNotFound(f"素材文件不存在: {src}")
+        name = _safe_filename(source.name)
+        destination = workspace.media_dir / f"{uuid4().hex[:8]}_{name}"
+        shutil.copy2(source.resolve(), destination)
+        relative = destination.relative_to(workspace.root).as_posix()
+        executor = self._executor(workspace)
+        facts = executor.probe(relative)
+        source_hash = self._cache_for(project_id).source_hash(destination)
+        with self.db.session() as session:
+            asset = MediaAsset(
+                id=f"m_{uuid4().hex[:10]}",
+                project_id=project_id,
+                src=relative,
+                facts_json=facts.model_dump_json(),
+                source_hash=source_hash,
+                is_primary=False,
+            )
+            session.add(asset)
+            session.flush()
+            payload = self._asset_dict(asset)
+        self._cache_for(project_id).remember_hash(destination, source_hash)
+        return payload
+
+    def set_primary_asset(self, project_id: str, asset_id: str) -> dict:
+        self._require_project(project_id)
+        with self.db.session() as session:
+            asset = session.get(MediaAsset, asset_id)
+            if asset is None or asset.project_id != project_id:
+                raise ResourceNotFound(f"素材不存在: {asset_id}")
+            session.execute(
+                update(MediaAsset)
+                .where(MediaAsset.project_id == project_id)
+                .values(is_primary=False)
+            )
+            asset.is_primary = True
+            session.flush()
+            payload = self._asset_dict(asset)
+        return payload
+
     def _register_asset(self, project_id: str, workspace: Workspace, destination: Path) -> dict:
         relative_src = destination.relative_to(workspace.root).as_posix()
         executor = self._executor(workspace)
@@ -683,6 +756,11 @@ class Services(
 
         with self.db.session() as session:
             asset = self._latest_asset(session, project_id)
+            session.execute(
+                update(MediaAsset)
+                .where(MediaAsset.project_id == project_id)
+                .values(is_primary=False)
+            )
             if asset is None:
                 asset = MediaAsset(
                     id=f"m_{uuid4().hex[:10]}",
@@ -690,6 +768,7 @@ class Services(
                     src=relative_src,
                     facts_json=facts.model_dump_json(),
                     source_hash=source_hash,
+                    is_primary=True,
                 )
                 session.add(asset)
             else:
@@ -697,6 +776,7 @@ class Services(
                 asset.facts_json = facts.model_dump_json()
                 asset.transcript_json = None
                 asset.source_hash = source_hash
+                asset.is_primary = True
             session.flush()
             asset_id = asset.id
 
@@ -709,6 +789,44 @@ class Services(
             "facts": facts.model_dump(mode="json"),
             "source_hash": source_hash,
         }
+
+    def ensure_baseline_revision(self, project_id: str) -> None:
+        """为视频素材幂等生成“全片单段”基线，桌面打开项目时调用。"""
+        try:
+            asset = self._require_asset(project_id)
+        except ResourceNotFound:
+            return
+        facts = MediaFacts.model_validate_json(asset.facts_json)
+        src = asset.src
+        if facts.video is None or facts.duration.as_fraction() <= 0:
+            return
+        try:
+            revisions = self.list_revisions(project_id)
+            if revisions:
+                latest = revisions[-1].get("ir") or {}
+                media = latest.get("media_facts") or {}
+                if media.get("src") == src:
+                    return
+            ir = EditIR(
+                project_id=project_id,
+                media_facts=facts,
+                sequence=[
+                    TrimOp(
+                        src=src,
+                        range=TimeRange(
+                            start=RationalTime(value=0, rate=90_000),
+                            end=facts.duration,
+                        ),
+                    )
+                ],
+            )
+            self.submit_revision(project_id, ir, origin="system")
+        except Exception as exc:
+            self.logger.warning(
+                "baseline_revision_failed",
+                project_id=project_id,
+                error=f"{type(exc).__name__}: {exc}",
+            )
 
     def transcribe(
         self,
@@ -1388,15 +1506,39 @@ class Services(
             )
 
         sequence = assign_trim_ids(ir.sequence)
+        source_facts = dict(ir.source_facts)
+        needed = {
+            op.src for op in sequence
+        } - {facts.src, *source_facts}
+        if needed:
+            with self.db.session() as session:
+                rows = session.scalars(
+                    select(MediaAsset).where(
+                        MediaAsset.project_id == project_id,
+                        MediaAsset.src.in_(sorted(needed)),
+                    )
+                ).all()
+                for row in rows:
+                    source_facts[row.src] = MediaFacts.model_validate_json(
+                        row.facts_json
+                    )
+            missing = needed - set(source_facts)
+            if missing:
+                raise IRValidationError(
+                    f"IR 引用了未知素材: {sorted(missing)}"
+                )
         normalized = EditIR(
             project_id=project_id,
             revision=0,
             media_facts=facts,
+            source_facts=source_facts,
             sequence=sequence,
             effects=ir.effects,
             transitions=ir.transitions,
             overlays=ir.overlays,
             removals=ir.removals,
+            pips=ir.pips,
+            track_states=ir.track_states,
             audio=ir.audio,
             subtitles=ir.subtitles,
             export=ir.export,
@@ -1407,11 +1549,14 @@ class Services(
             project_id=project_id,
             revision=0,
             media_facts=facts,
+            source_facts=source_facts,
             sequence=sequence,
             effects=ir.effects,
             transitions=ir.transitions,
             overlays=ir.overlays,
             removals=ir.removals,
+            pips=ir.pips,
+            track_states=ir.track_states,
             audio=ir.audio,
             subtitles=ir.subtitles,
             export=ir.export,
@@ -1720,6 +1865,8 @@ class Services(
             transitions=ir.transitions,
             overlays=ir.overlays,
             removals=ir.removals,
+            pips=ir.pips,
+            track_states=ir.track_states,
             audio=ir.audio,
             subtitles=ir.subtitles,
             export=ir.export,

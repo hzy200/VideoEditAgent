@@ -52,13 +52,13 @@ class EvidencePanel(QWidget):
 
         self.status = QLabel("尚未生成视觉证据")
         self.status.setWordWrap(True)
-        self.status.setStyleSheet("color:#64748b;")
+        self.status.setObjectName("mutedText")
         layout.addWidget(self.status)
 
         self.preview = QLabel("证据视图将在这里显示")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumHeight(150)
-        self.preview.setStyleSheet("background:#0b1220;color:#64748b;border-radius:6px;")
+        self.preview.setObjectName("mediaCanvas")
         layout.addWidget(self.preview)
 
         self.table = QTableWidget(0, 4)

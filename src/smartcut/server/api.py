@@ -67,6 +67,14 @@ class RawMediaImportRequest(BaseModel):
     src: str = Field(min_length=1, description="本地文件路径；只复制，不 probe")
 
 
+class UnderstandRequest(BaseModel):
+    question: str = Field(default="", max_length=2000)
+
+
+class AddMediaAssetRequest(BaseModel):
+    src: str = Field(min_length=1, description="本地素材路径；复制进项目 bin")
+
+
 class PlanRequest(BaseModel):
     goal: str = Field(min_length=1)
 
@@ -376,6 +384,32 @@ def transcode(
     return {"job_id": job_id, "status": "queued"}
 
 
+@router.get("/projects/{project_id}/assets")
+def list_media_assets(
+    project_id: str,
+    services: Services = Depends(get_services),
+) -> dict:
+    return {"assets": services.list_media_assets(project_id)}
+
+
+@router.post("/projects/{project_id}/assets")
+def add_media_asset(
+    project_id: str,
+    payload: AddMediaAssetRequest,
+    services: Services = Depends(get_services),
+) -> dict:
+    return services.add_media_asset(project_id, payload.src)
+
+
+@router.post("/projects/{project_id}/assets/{asset_id}/primary")
+def set_primary_asset(
+    project_id: str,
+    asset_id: str,
+    services: Services = Depends(get_services),
+) -> dict:
+    return services.set_primary_asset(project_id, asset_id)
+
+
 @router.post("/projects/{project_id}/media/diagnose")
 def diagnose_media(
     project_id: str,
@@ -437,6 +471,24 @@ def interpret_media_goal(
             detail="未识别为媒体修复/转换意图",
         )
     return plan.model_dump(mode="json")
+
+
+@router.post("/projects/{project_id}/understand", status_code=202)
+def understand_video(
+    project_id: str,
+    payload: UnderstandRequest,
+    services: Services = Depends(get_services),
+) -> dict:
+    """只理解视频内容并返回文字回答，不创建 revision、不渲染。"""
+    services.get_project(project_id)
+    job_id = services.jobs.submit(
+        project_id,
+        "understand",
+        lambda reporter: services.understand_video(
+            project_id, payload.question, reporter
+        ),
+    )
+    return {"job_id": job_id, "status": "queued"}
 
 
 @router.post("/projects/{project_id}/media/operation", status_code=202)

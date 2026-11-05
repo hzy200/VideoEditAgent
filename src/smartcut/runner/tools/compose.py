@@ -13,24 +13,27 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from smartcut.contracts.encoder import EncoderProfile, video_encoder_args
 from smartcut.contracts.time import RationalTime
+from smartcut.contracts.timeline_ops import (
+    TRANSITION_AUDIO_CURVES,
+    TRANSITION_TYPES,
+)
 from smartcut.runner.tools.base import ToolContext
 
 
 class ComposeTransition(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    type: Literal[
-        "fade",
-        "fadeblack",
-        "fadewhite",
-        "wipeleft",
-        "wiperight",
-        "slideleft",
-        "slideright",
-        "circleopen",
-        "dissolve",
-    ] = "fade"
+    type: str = "fade"
     duration: RationalTime
+    audio_curve: str = "tri"
+
+    @model_validator(mode="after")
+    def _known(self) -> "ComposeTransition":
+        if self.type not in TRANSITION_TYPES:
+            raise ValueError(f"未知转场类型: {self.type!r}")
+        if self.audio_curve not in TRANSITION_AUDIO_CURVES:
+            raise ValueError(f"未知音频转场曲线: {self.audio_curve!r}")
+        return self
 
 
 class ComposeArgs(BaseModel):
@@ -113,7 +116,8 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
             if overlap > 0:
                 parts.append(
                     f"[{audio_label}][{index}:a]"
-                    f"acrossfade=d={_to_seconds(overlap)}:c1=tri:c2=tri"
+                    f"acrossfade=d={_to_seconds(overlap)}:"
+                    f"c1={transition.audio_curve}:c2={transition.audio_curve}"
                     f"[{next_audio}]"
                 )
             else:

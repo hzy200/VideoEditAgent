@@ -18,6 +18,7 @@ class EditSnapshot:
     overlays: list[dict] = field(default_factory=list)
     removals: list[dict] = field(default_factory=list)
     audio: dict = field(default_factory=dict)
+    track_states: dict = field(default_factory=dict)
     subtitles: list[dict] = field(default_factory=list)
     subtitles_dirty: bool = False
     export: dict = field(default_factory=dict)

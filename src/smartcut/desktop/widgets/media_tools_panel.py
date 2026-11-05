@@ -63,7 +63,7 @@ class MediaToolsPanel(QWidget):
         layout.addWidget(self.progress)
 
         self.status = QLabel("等待操作")
-        self.status.setStyleSheet("color:#64748b;")
+        self.status.setObjectName("mutedText")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
 
@@ -113,6 +113,12 @@ class MediaToolsPanel(QWidget):
         index = self.source.findData(current)
         if index >= 0:
             self.source.setCurrentIndex(index)
+
+    def clear_sources(self) -> None:
+        self._render_rel = None
+        self._extra_sources = []
+        self._audio_assets = []
+        self._rebuild_sources()
 
     def add_source(self, path: str, name: str | None = None) -> None:
         self._extra_sources.append(

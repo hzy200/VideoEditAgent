@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from PySide6.QtCore import Qt, Signal
+import json
+
+from PySide6.QtCore import QMimeData, Qt, Signal
 from PySide6.QtWidgets import (
     QFormLayout,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -17,6 +20,31 @@ from PySide6.QtWidgets import (
 
 from smartcut.desktop.formatting import seconds_or_none
 
+MEDIA_MIME = "application/x-smartcut-media"
+
+
+class MediaBinList(QListWidget):
+    """素材 bin：支持把素材拖入时间线。"""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QListWidget.DragDropMode.DragOnly)
+        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+
+    def mimeData(self, items) -> QMimeData:  # type: ignore[override]
+        data = QMimeData()
+        payload = [
+            item.data(Qt.ItemDataRole.UserRole) for item in items
+        ]
+        data.setData(
+            MEDIA_MIME,
+            json.dumps(
+                [item for item in payload if item], ensure_ascii=False
+            ).encode("utf-8"),
+        )
+        return data
+
 
 class ProjectPanel(QWidget):
     new_project = Signal()
@@ -24,8 +52,12 @@ class ProjectPanel(QWidget):
     rename_project = Signal(str)
     delete_project = Signal(str)
     import_media = Signal()
+    add_media = Signal()
+    add_pip = Signal(object)
     upload_media = Signal()
     transcribe = Signal()
+    asset_selected = Signal(object)
+    asset_activated = Signal(object)
     refresh = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -34,7 +66,8 @@ class ProjectPanel(QWidget):
         self.setMaximumWidth(380)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
 
         project_group = QGroupBox("项目")
         project_layout = QVBoxLayout(project_group)
@@ -52,23 +85,35 @@ class ProjectPanel(QWidget):
         manage_row = QHBoxLayout()
         self.rename_button = QPushButton("重命名")
         self.delete_button = QPushButton("删除")
+        self.delete_button.setObjectName("dangerButton")
         manage_row.addWidget(self.rename_button)
         manage_row.addWidget(self.delete_button)
         project_layout.addLayout(manage_row)
         layout.addWidget(project_group, 1)
 
-        media_group = QGroupBox("素材")
+        media_group = QGroupBox("素材 bin")
         media_layout = QVBoxLayout(media_group)
-        row = QHBoxLayout()
-        self.import_button = QPushButton("导入")
+        self.import_button = QPushButton("导入主素材")
+        self.import_button.setObjectName("primaryButton")
+        self.add_button = QPushButton("添加素材")
+        self.pip_button = QPushButton("画中画")
         self.upload_button = QPushButton("上传")
-        row.addWidget(self.import_button)
-        row.addWidget(self.upload_button)
-        media_layout.addLayout(row)
         self.transcribe_button = QPushButton("本地转写")
-        media_layout.addWidget(self.transcribe_button)
         self.replace_button = QPushButton("替换素材")
-        media_layout.addWidget(self.replace_button)
+        actions = QGridLayout()
+        actions.setSpacing(6)
+        actions.addWidget(self.import_button, 0, 0)
+        actions.addWidget(self.add_button, 0, 1)
+        actions.addWidget(self.pip_button, 1, 0)
+        actions.addWidget(self.upload_button, 1, 1)
+        actions.addWidget(self.transcribe_button, 2, 0)
+        actions.addWidget(self.replace_button, 2, 1)
+        media_layout.addLayout(actions)
+        self.media_list = MediaBinList()
+        self.media_list.setMinimumHeight(90)
+        self.media_list.currentItemChanged.connect(self._on_asset_changed)
+        self.media_list.itemDoubleClicked.connect(self._on_asset_activated)
+        media_layout.addWidget(self.media_list)
 
         form = QFormLayout()
         self.name_label = QLabel("-")
@@ -93,6 +138,8 @@ class ProjectPanel(QWidget):
         self.rename_button.clicked.connect(self._emit_rename)
         self.delete_button.clicked.connect(self._emit_delete)
         self.import_button.clicked.connect(self.import_media.emit)
+        self.add_button.clicked.connect(self.add_media.emit)
+        self.pip_button.clicked.connect(self._emit_pip)
         self.upload_button.clicked.connect(self.upload_media.emit)
         self.transcribe_button.clicked.connect(self.transcribe.emit)
         self.replace_button.clicked.connect(self.import_media.emit)
@@ -101,6 +148,8 @@ class ProjectPanel(QWidget):
     def set_project_enabled(self, enabled: bool) -> None:
         for button in (
             self.import_button,
+            self.add_button,
+            self.pip_button,
             self.upload_button,
             self.transcribe_button,
             self.replace_button,
@@ -108,6 +157,7 @@ class ProjectPanel(QWidget):
             self.delete_button,
         ):
             button.setEnabled(enabled)
+        self.media_list.setEnabled(enabled)
 
     def set_projects(self, projects: list[dict]) -> None:
         current_id = self.selected_project_id()
@@ -141,9 +191,47 @@ class ProjectPanel(QWidget):
         item = self.project_list.currentItem()
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
+    def set_assets(self, assets: list[dict]) -> None:
+        current = self.selected_asset()
+        current_src = (current or {}).get("src")
+        self.media_list.blockSignals(True)
+        self.media_list.clear()
+        for asset in assets or []:
+            facts = asset.get("facts") or {}
+            duration = seconds_or_none(facts.get("duration"))
+            kind = asset.get("kind") or (
+                "video" if facts.get("video") else "audio"
+            )
+            primary = "★ " if asset.get("is_primary") else ""
+            label = (
+                f"{primary}{asset.get('name') or asset.get('src')}"
+                f" · {kind}"
+                + (f" · {duration:.1f}s" if duration is not None else "")
+            )
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, asset)
+            item.setToolTip(str(asset.get("src") or ""))
+            self.media_list.addItem(item)
+        if current_src:
+            for index in range(self.media_list.count()):
+                item = self.media_list.item(index)
+                data = item.data(Qt.ItemDataRole.UserRole) or {}
+                if data.get("src") == current_src:
+                    self.media_list.setCurrentItem(item)
+                    break
+        elif assets:
+            self.media_list.setCurrentRow(0)
+        self.media_list.blockSignals(False)
+
+    def selected_asset(self) -> dict | None:
+        item = self.media_list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
     def set_project(self, project: dict) -> None:
         self.set_project_enabled(True)
         asset = project.get("asset")
+        assets = project.get("assets") or ([asset] if asset else [])
+        self.set_assets(assets)
         if not asset:
             self.name_label.setText("-")
             self.duration_label.setText("-")
@@ -177,3 +265,15 @@ class ProjectPanel(QWidget):
     def _on_current_changed(self, current: QListWidgetItem | None, _previous) -> None:
         if current is not None:
             self.open_project.emit(current.data(Qt.ItemDataRole.UserRole))
+
+    def _on_asset_changed(self, current: QListWidgetItem | None, _previous) -> None:
+        if current is not None:
+            self.asset_selected.emit(current.data(Qt.ItemDataRole.UserRole) or {})
+
+    def _on_asset_activated(self, item: QListWidgetItem) -> None:
+        self.asset_activated.emit(item.data(Qt.ItemDataRole.UserRole) or {})
+
+    def _emit_pip(self) -> None:
+        asset = self.selected_asset()
+        if asset:
+            self.add_pip.emit(asset)

@@ -7,13 +7,17 @@ from collections import Counter
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from PySide6.QtCore import QByteArray, QEvent, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDesktopServices
 from pydantic import TypeAdapter
 from PySide6.QtWidgets import (
+    QAbstractButton,
     QAbstractItemView,
     QAbstractSpinBox,
+    QComboBox,
+    QSlider,
     QApplication,
     QDialog,
     QDialogButtonBox,
@@ -26,6 +30,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QSplitter,
+    QSizePolicy,
     QStyle,
     QTabWidget,
     QTextBrowser,
@@ -44,7 +49,7 @@ from smartcut.desktop.edit_session import EditSession, EditSnapshot
 from smartcut.desktop.formatting import seconds_or_none
 from smartcut.desktop.paths import bundled_separator
 from smartcut.desktop.settings_store import DesktopConfig, SettingsStore
-from smartcut.desktop.theme import apply_theme
+from smartcut.desktop.theme import apply_standard_icon, apply_theme
 from smartcut.desktop.widgets.ai_panel import AIPanel
 from smartcut.desktop.widgets.audio_panel import AudioPanel
 from smartcut.desktop.widgets.candidate_panel import CandidatePanel
@@ -110,6 +115,8 @@ class MainWindow(QMainWindow):
         self.unsaved = False
         self._pending_after_save: Any | None = None
         self._close_after_save = False
+        self._revision_submit_inflight = False
+        self._save_snapshot: EditSnapshot | None = None
         self._subtitle_cues: list[dict] = []
         self._subtitles_dirty = False
         self._session = EditSession()
@@ -174,12 +181,16 @@ class MainWindow(QMainWindow):
         self.center_splitter = center_splitter
         self.preview_panel = PreviewPanel()
         self.timeline_panel = TimelinePanel()
+        # 桌面主窗口使用输出时间/ripple 时间线；面板单测保持旧源时间语义。
+        self.timeline_panel.timeline.set_output_time(True)
         center_splitter.addWidget(self.preview_panel)
         center_splitter.addWidget(self.timeline_panel)
         center_splitter.setSizes([560, 280])
         splitter.addWidget(center_splitter)
 
         self.tabs = QTabWidget()
+        self.tabs.setObjectName("workspaceTabs")
+        self.tabs.tabBar().setObjectName("workspaceTabBar")
         self.ai_panel = AIPanel()
         self.inspector_panel = InspectorPanel()
         self.subtitle_panel = SubtitlePanel()
@@ -188,6 +199,9 @@ class MainWindow(QMainWindow):
         self.timing_panel = TimingPanel()
         self.media_tools_panel = MediaToolsPanel()
         self._audio_assets_for_tools: list[dict] = []
+        self._asset_facts: dict[str, dict] = {}
+        self._bin_preview_src: str | None = None
+        self._pips: list[dict] = []
         self.outline_panel = OutlinePanel()
         self.perception_panel = PerceptionPanel()
         self.candidate_panel = CandidatePanel()
@@ -257,59 +271,123 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
         toolbar.setIconSize(QSize(18, 18))
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        # 专业剪辑器工具栏：图标按钮 + 分组 + 悬停提示，主操作靠右强调。
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
         self.toolbar = toolbar
 
         def icon(pixmap: QStyle.StandardPixmap):
             return self.style().standardIcon(pixmap)
 
-        new_action = toolbar.addAction(icon(QStyle.StandardPixmap.SP_FileIcon), "新建")
+        def add_action(pixmap: QStyle.StandardPixmap, text: str, tooltip: str):
+            action = toolbar.addAction(icon(pixmap), text)
+            apply_standard_icon(action, pixmap, 18)
+            action.setToolTip(tooltip)
+            return action
+
+        new_action = add_action(
+            QStyle.StandardPixmap.SP_FileIcon, "新建", "新建项目（Ctrl+N）"
+        )
         new_action.triggered.connect(self._on_new_project)
-        import_action = toolbar.addAction(
-            icon(QStyle.StandardPixmap.SP_DialogOpenButton), "导入"
+        import_action = add_action(
+            QStyle.StandardPixmap.SP_DialogOpenButton,
+            "导入",
+            "导入素材（Ctrl+O）",
         )
         import_action.triggered.connect(self._on_import)
-        upload_action = toolbar.addAction(
-            icon(QStyle.StandardPixmap.SP_ArrowUp), "上传"
+        upload_action = add_action(
+            QStyle.StandardPixmap.SP_ArrowUp, "上传", "上传素材（Ctrl+Shift+O）"
         )
         upload_action.triggered.connect(self._on_upload)
         toolbar.addSeparator()
-        undo_action = toolbar.addAction(
-            icon(QStyle.StandardPixmap.SP_ArrowBack), "撤销"
+        undo_action = add_action(
+            QStyle.StandardPixmap.SP_ArrowBack, "撤销", "撤销（Ctrl+Z）"
         )
         undo_action.triggered.connect(self._undo)
-        redo_action = toolbar.addAction(
-            icon(QStyle.StandardPixmap.SP_ArrowForward), "重做"
+        redo_action = add_action(
+            QStyle.StandardPixmap.SP_ArrowForward,
+            "重做",
+            "重做（Ctrl+Shift+Z / Ctrl+Y）",
         )
         redo_action.triggered.connect(self._redo)
         toolbar.addSeparator()
+        prev_action = add_action(
+            QStyle.StandardPixmap.SP_MediaSkipBackward,
+            "上一帧",
+            "上一帧（←）",
+        )
+        prev_action.triggered.connect(lambda: self._step_frames(-1))
         self.toolbar_play_action = toolbar.addAction(
             icon(QStyle.StandardPixmap.SP_MediaPlay), "播放"
         )
+        apply_standard_icon(
+            self.toolbar_play_action, QStyle.StandardPixmap.SP_MediaPlay, 18
+        )
         self.toolbar_play_action.setToolTip("播放 / 暂停（空格）")
+        self.toolbar_play_action.setCheckable(True)
         self.toolbar_play_action.triggered.connect(self.preview_panel.toggle_play)
-        stop_action = toolbar.addAction(
-            icon(QStyle.StandardPixmap.SP_MediaStop), "停止"
+        next_action = add_action(
+            QStyle.StandardPixmap.SP_MediaSkipForward,
+            "下一帧",
+            "下一帧（→）",
+        )
+        next_action.triggered.connect(lambda: self._step_frames(1))
+        stop_action = add_action(
+            QStyle.StandardPixmap.SP_MediaStop, "停止", "停止并回到起点"
         )
         stop_action.triggered.connect(self.preview_panel.stop)
-        toolbar.addSeparator()
-        save_action = toolbar.addAction(
-            icon(QStyle.StandardPixmap.SP_DialogSaveButton), "保存版本"
+
+        spacer = QWidget()
+        spacer.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+        )
+        toolbar.addWidget(spacer)
+
+        media_action = add_action(
+            QStyle.StandardPixmap.SP_BrowserReload, "媒体工具", "打开媒体工具"
+        )
+        media_action.triggered.connect(
+            lambda: self._show_panel(self.media_tools_panel)
+        )
+        save_action = add_action(
+            QStyle.StandardPixmap.SP_DialogSaveButton,
+            "保存版本",
+            "保存为新版本（Ctrl+S）",
         )
         save_action.triggered.connect(self._on_save_revision)
         self.toolbar_render_action = toolbar.addAction(
             icon(QStyle.StandardPixmap.SP_DialogApplyButton), "渲染"
         )
+        self.toolbar_render_action.setShortcut("Ctrl+R")
+        self.toolbar_render_action.setToolTip("渲染当前版本（Ctrl+R）")
         self.toolbar_render_action.triggered.connect(self._on_toolbar_render)
-        toolbar.addSeparator()
-        media_action = toolbar.addAction(
-            icon(QStyle.StandardPixmap.SP_BrowserReload), "媒体工具"
-        )
-        media_action.triggered.connect(
-            lambda: self._show_panel(self.media_tools_panel)
-        )
+        render_button = toolbar.widgetForAction(self.toolbar_render_action)
+        if render_button is not None:
+            render_button.setObjectName("primaryToolButton")
+            render_button.setToolButtonStyle(
+                Qt.ToolButtonStyle.ToolButtonTextBesideIcon
+            )
+        play_button = toolbar.widgetForAction(self.toolbar_play_action)
+        if play_button is not None:
+            play_button.setObjectName("transportPlay")
+            play_button.setFixedSize(32, 28)
+        for action in (
+            new_action,
+            import_action,
+            upload_action,
+            undo_action,
+            redo_action,
+            prev_action,
+            next_action,
+            stop_action,
+            media_action,
+            save_action,
+        ):
+            button = toolbar.widgetForAction(action)
+            if button is not None:
+                button.setFixedSize(30, 28)
         self.preview_panel.playing_changed.connect(self._on_playing_changed)
+        self.preview_panel.step_requested.connect(self._step_frames)
 
     def _on_playing_changed(self, playing: bool) -> None:
         icon = (
@@ -317,8 +395,9 @@ class MainWindow(QMainWindow):
             if playing
             else QStyle.StandardPixmap.SP_MediaPlay
         )
-        self.toolbar_play_action.setIcon(self.style().standardIcon(icon))
+        apply_standard_icon(self.toolbar_play_action, icon, 18)
         self.toolbar_play_action.setText("暂停" if playing else "播放")
+        self.toolbar_play_action.setChecked(playing)
 
     def _on_toolbar_render(self) -> None:
         revision = self.inspector_panel.current_revision()
@@ -392,6 +471,14 @@ class MainWindow(QMainWindow):
         self.project_panel.new_project.connect(self._on_new_project)
         self.project_panel.open_project.connect(self._on_project_selected)
         self.project_panel.import_media.connect(self._on_import)
+        self.project_panel.add_media.connect(self._on_add_media)
+        self.project_panel.add_pip.connect(self._on_add_pip)
+        self.project_panel.asset_selected.connect(
+            self._on_bin_asset_selected
+        )
+        self.project_panel.asset_activated.connect(
+            self._on_bin_asset_selected
+        )
         self.project_panel.upload_media.connect(self._on_upload)
         self.project_panel.transcribe.connect(self._on_transcribe)
         self.project_panel.refresh.connect(self._on_refresh_project)
@@ -399,6 +486,7 @@ class MainWindow(QMainWindow):
         self.project_panel.delete_project.connect(self._on_delete_project)
 
         self.ai_panel.run_requested.connect(self._on_orchestrate)
+        self.ai_panel.understand_requested.connect(self._on_understand)
         self.ai_panel.media_goal_requested.connect(self._on_ai_media_goal)
         self.ai_panel.cancel_requested.connect(self._on_cancel_jobs)
         self.ai_panel.review_requested.connect(self._on_review_render)
@@ -450,7 +538,19 @@ class MainWindow(QMainWindow):
             self.inspector_panel.clear_segment
         )
         self.timeline_panel.modified.connect(self._on_timeline_modified)
+        self.timeline_panel.transition_changed.connect(
+            self._on_timeline_transition
+        )
+        self.timeline_panel.track_states_changed.connect(
+            self._on_track_states_changed
+        )
+        self.timeline_panel.preview_requested.connect(
+            self._request_effects_preview
+        )
         self.perception_panel.keyframe_selected.connect(self.preview_panel.seek)
+        self.preview_panel.pip_changed.connect(
+            self._on_pip_transform_changed
+        )
         self.preview_panel.position_changed.connect(self.timeline_panel.set_position)
         self.preview_panel.position_changed.connect(self.audio_panel.set_playhead)
         self.candidate_panel.search_requested.connect(self.controller.search_candidates)
@@ -459,6 +559,9 @@ class MainWindow(QMainWindow):
         )
         self.candidate_panel.add_requested.connect(self.timeline_panel.add_candidates)
         self.inspector_panel.diff_requested.connect(self.controller.diff_revisions)
+        self.inspector_panel.revision_selected.connect(
+            self._on_revision_selected
+        )
 
         self.controller.projects_changed.connect(self._on_projects)
         self.controller.project_opened.connect(self._on_project_opened)
@@ -513,6 +616,8 @@ class MainWindow(QMainWindow):
         panels: list[tuple[QWidget, str]],
     ) -> None:
         inner = QTabWidget()
+        inner.setObjectName("panelTabs")
+        inner.tabBar().setObjectName("panelTabBar")
         for panel, label in panels:
             inner.addTab(panel, label)
         outer_index = self.tabs.addTab(inner, title)
@@ -577,18 +682,42 @@ class MainWindow(QMainWindow):
         self.project_panel.set_projects(projects)
         if not projects:
             self.current_project = None
+            self.current_ir = None
             self._loaded_project_id = None
+            self.unsaved = False
+            self._showing_output = False
             self.timeline_panel.clear()
             self.preview_panel.clear()
+            self.ai_panel.clear()
             self.ai_panel.set_project_enabled(False)
             self.media_tools_panel.set_project_enabled(False)
             self.project_panel.set_project_enabled(False)
+            self.inspector_panel.set_revisions([])
+            self.inspector_panel.set_artifacts([])
+            self.inspector_panel.clear_segment()
             self.subtitle_panel.set_cues([], burn=False)
             self.audio_panel.set_audio(None)
             self.audio_panel.set_assets([])
             self.audio_panel.set_context(main_duration=0)
             self.audio_panel.set_tracks([], main_duration=0)
             self.timeline_panel.set_audio_tracks([])
+            self.effects_panel.clear()
+            self._sync_effect_scope()
+            self.timing_panel.clear()
+            self._timing = {
+                "speeds": {},
+                "transitions": [],
+                "overlays": [],
+                "removals": [],
+            }
+            self._pips = []
+            self.timeline_panel.set_pips([])
+            self.preview_panel.set_pips([])
+            self.outline_panel.clear()
+            self.candidate_panel.clear()
+            self.evidence_panel.clear()
+            self.metrics_panel.clear()
+            self._session.reset(None)
             self._subtitle_cues = []
             self._subtitles_dirty = False
             return
@@ -628,12 +757,33 @@ class MainWindow(QMainWindow):
             return "discard"
         return "cancel"
 
+    def _on_revision_selected(self, revision_no: int) -> None:
+        if self.current_project is None:
+            return
+        current = (self.current_ir or {}).get("revision")
+        if current is not None and int(current) == int(revision_no):
+            return
+        if self.unsaved:
+            decision = self._resolve_unsaved("切换版本")
+            if decision == "cancel":
+                if current is not None:
+                    self.inspector_panel.select_revision(int(current))
+                return
+            if decision == "save":
+                self._pending_after_save = (
+                    lambda: self.controller.load_revision(int(revision_no))
+                )
+                self._on_save_revision()
+                return
+        self.controller.load_revision(int(revision_no))
+
     def _on_timeline_modified(self, changed: bool) -> None:
         if not changed:
             return
         self._sync_timing_panel()
         self._record_change()
         self._sync_effect_scope()
+        self._refresh_preview_pip_overlays()
         self._set_status("时间线已修改（未保存）")
 
     # ── 统一编辑会话 ──────────────────────────────────────────────────
@@ -647,6 +797,7 @@ class MainWindow(QMainWindow):
             overlays=deepcopy(self._timing.get("overlays") or []),
             removals=deepcopy(self._timing.get("removals") or []),
             audio=deepcopy(ir.get("audio") or {}),
+            track_states=self.timeline_panel.track_states(),
             subtitles=(
                 deepcopy(self._subtitle_cues)
                 if self._subtitles_dirty
@@ -666,6 +817,9 @@ class MainWindow(QMainWindow):
         self._restoring = True
         try:
             self.timeline_panel.restore_segments(deepcopy(snapshot.sequence))
+            self.timeline_panel.set_track_states(
+                deepcopy(snapshot.track_states)
+            )
             self.effects_panel.set_effects(deepcopy(snapshot.effects))
             self._timing = {
                 "speeds": deepcopy(snapshot.speeds),
@@ -818,6 +972,7 @@ class MainWindow(QMainWindow):
         if self._loaded_project_id != project_id:
             self._loaded_project_id = project_id
             self._showing_output = False
+            self._bin_preview_src = None
             self.unsaved = False
             self.config.last_project_id = project_id
             self.timeline_panel.clear()
@@ -830,6 +985,7 @@ class MainWindow(QMainWindow):
             self.metrics_panel.clear()
             self.subtitle_panel.set_cues([])
             self.preference_panel.set_preference(None)
+            self.media_tools_panel.clear_sources()
             self.audio_panel.set_audio(None)
             self.effects_panel.clear()
             self._sync_effect_scope()
@@ -843,6 +999,9 @@ class MainWindow(QMainWindow):
             self.timing_panel.set_overlay_assets([])
             self.timing_panel.clear()
             self._session.reset(None)
+            self._pips = []
+            self.timeline_panel.set_pips([])
+            self.preview_panel.set_pips([])
             self.audio_panel.set_assets(project.get("audio_assets") or [])
             self.audio_panel.set_context(main_duration=self._main_duration(project))
             self.audio_panel.set_tracks(None, main_duration=self._main_duration(project))
@@ -852,8 +1011,9 @@ class MainWindow(QMainWindow):
             self.current_ir = None
 
         self.current_project = project
-        self.media_tools_panel.set_project_enabled(project.get("asset") is not None)
+        self.media_tools_panel.set_project_enabled(True)
         self.media_tools_panel.set_render_rel(None)
+        self._load_source_preview(project)
         self._overlay_assets = list(project.get("overlay_assets") or [])
         self.timing_panel.set_overlay_assets(self._overlay_assets)
         workspace_dir = project.get("workspace_dir")
@@ -864,6 +1024,15 @@ class MainWindow(QMainWindow):
             Path(workspace_dir) if workspace_dir else None
         )
         self._on_audio_assets_changed(project.get("audio_assets") or [])
+        assets = project.get("assets") or []
+        if not assets and project.get("asset"):
+            assets = [project["asset"]]
+        self._asset_facts = {
+            str(item.get("src")): item.get("facts") or {}
+            for item in assets
+            if item.get("src")
+        }
+        self.timeline_panel.set_source_assets(assets)
         self.project_panel.set_project(project)
         self.project_panel.select_project(project_id)
         self.inspector_panel.set_workspace(project.get("workspace_dir", "-"))
@@ -871,23 +1040,61 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(f"SmartCut — {project.get('name') or '未命名项目'}")
         self._set_status(f"已打开项目 {project.get('name') or project_id}")
 
+    def _load_source_preview(self, project: dict | None) -> None:
+        if self._showing_output or self._bin_preview_src or not project:
+            return
+        asset = project.get("asset") or {}
+        src = asset.get("src")
+        workspace = project.get("workspace_dir")
+        if not src or not workspace:
+            return
+        path = Path(workspace) / src
+        if not path.is_file():
+            return
+        self.preview_panel.load_media(str(path), "源文件预览 · 代理生成中")
+
     def _on_asset_changed(self, asset: dict) -> None:
+        self._showing_output = False
         self._set_status("素材已复制到工作区并完成 probe")
 
     def _on_proxy_ready(self, path: str) -> None:
-        if not self._showing_output:
-            self.preview_panel.load_media(path, "代理预览")
-        self._set_status("预览代理已就绪")
+        if self._showing_output or self._bin_preview_src:
+            return
+        target = Path(path)
+        if not target.is_file():
+            return
+        position = self.preview_panel.current_position()
+        was_playing = self.preview_panel.is_playing()
+        self.preview_panel.load_media(str(target), "代理预览")
+        if position > 0.01:
+            QTimer.singleShot(
+                150, lambda: self.preview_panel.seek(position)
+            )
+        if was_playing:
+            QTimer.singleShot(220, self.preview_panel.toggle_play)
+        self._set_status("预览代理已就绪，可流畅预览")
 
     def _on_refresh_project(self) -> None:
-        if self.controller.current_project:
-            self.controller.open_project(self.controller.current_project)
-        else:
+        if not self.controller.current_project:
             self.controller.refresh_projects()
+            return
+        decision = self._resolve_unsaved("刷新项目")
+        if decision == "cancel":
+            return
+        if decision == "save":
+            self._pending_after_save = (
+                lambda: self.controller.open_project(
+                    self.controller.current_project
+                )
+            )
+            self._on_save_revision()
+            return
+        self.controller.open_project(self.controller.current_project)
 
     # ── 版本/片段 ─────────────────────────────────────────────────────
     def _on_revisions(self, revisions: list[dict]) -> None:
         self.inspector_panel.set_revisions(revisions)
+        self.toolbar_render_action.setEnabled(bool(revisions))
         if not revisions:
             self.current_ir = None
             self.timeline_panel.clear()
@@ -905,6 +1112,9 @@ class MainWindow(QMainWindow):
             self._session.reset(None)
             return
         latest = max(int(item["revision"]) for item in revisions)
+        # 保存期间用户继续编辑时不覆盖当前草稿；等用户保存/放弃后再加载。
+        if self.unsaved:
+            return
         self.inspector_panel.select_revision(latest)
         self.controller.load_revision(latest)
 
@@ -932,6 +1142,9 @@ class MainWindow(QMainWindow):
             "overlays": deepcopy(ir.get("overlays") or []),
             "removals": deepcopy(ir.get("removals") or []),
         }
+        self._pips = deepcopy(ir.get("pips") or [])
+        self.timeline_panel.set_pips(self._pips)
+        self._refresh_preview_pip_overlays()
         self._sync_timing_panel()
         self.media_tools_panel.set_render_rel(self._current_render_rel())
         self.subtitle_panel.set_cues(
@@ -978,14 +1191,19 @@ class MainWindow(QMainWindow):
             raise ValueError("当前 EditIR 缺少 media_facts.src")
 
         sequence = []
+        used_sources: set[str] = set()
+        use_absolute = True
+        output_spans, _ = self.timeline_panel.timeline._output_spans()
         for index, segment in enumerate(segments, start=1):
             start = float(segment["start"])
             end = float(segment["end"])
             if end <= start:
                 raise ValueError(f"第 {index} 段结束时间必须大于开始时间")
+            segment_src = str(segment.get("src") or source)
+            used_sources.add(segment_src)
             item: dict = {
                 "op": "trim",
-                "src": source,
+                "src": segment_src,
                 "range": {
                     "start": RationalTime.from_seconds(
                         start, rate=90_000
@@ -999,6 +1217,23 @@ class MainWindow(QMainWindow):
             }
             if segment.get("id"):
                 item["id"] = segment["id"]
+            if int(segment.get("track") or 0):
+                item["track"] = int(segment["track"])
+            if segment.get("transform"):
+                item["transform"] = segment["transform"]
+            if segment.get("keyframes"):
+                item["keyframes"] = deepcopy(segment["keyframes"])
+            explicit_start = segment.get("timeline_start")
+            if explicit_start is None and use_absolute:
+                explicit_start = (
+                    output_spans[index - 1][0]
+                    if index - 1 < len(output_spans)
+                    else 0.0
+                )
+            if explicit_start is not None:
+                item["timeline_start"] = RationalTime.from_seconds(
+                    f"{float(explicit_start):.6f}", rate=90_000
+                ).model_dump()
             speed = float(
                 (self._timing.get("speeds") or {}).get(
                     segment.get("id") or "", 1.0
@@ -1011,6 +1246,17 @@ class MainWindow(QMainWindow):
         payload = dict(self.current_ir)
         payload["revision"] = 0
         payload["sequence"] = sequence
+        asset_facts = dict(getattr(self, "_asset_facts", {}) or {})
+        payload["source_facts"] = {
+            src: asset_facts[src]
+            for src in used_sources
+            if src != source and src in asset_facts
+        }
+        missing_sources = used_sources - {source} - set(payload["source_facts"])
+        if missing_sources:
+            raise ValueError(
+                "时间线引用了未知素材: " + ", ".join(sorted(missing_sources))
+            )
         export = dict(payload.get("export") or {})
         export["preset"] = self.config.export_preset or "mp4_h264"
         payload["export"] = export
@@ -1021,6 +1267,8 @@ class MainWindow(QMainWindow):
         payload["transitions"] = deepcopy(self._timing.get("transitions") or [])
         payload["overlays"] = deepcopy(self._timing.get("overlays") or [])
         payload["removals"] = deepcopy(self._timing.get("removals") or [])
+        payload["pips"] = deepcopy(self._pips)
+        payload["track_states"] = self.timeline_panel.track_states()
         segment_ids_order = [item.get("id") for item in sequence]
         valid_ids = {segment_id for segment_id in segment_ids_order if segment_id}
         last_id = segment_ids_order[-1] if segment_ids_order else None
@@ -1069,7 +1317,11 @@ class MainWindow(QMainWindow):
         """找出用户删除（而非拆分/裁剪）的旧片段，用于排除被拒标签。"""
         base_ops = (self.current_ir or {}).get("sequence") or []
         kept = [
-            (op.range.start.to_float(), op.range.end.to_float())
+            (
+                op.src,
+                op.range.start.to_float(),
+                op.range.end.to_float(),
+            )
             for op in draft.sequence
         ]
         removed: list[dict] = []
@@ -1079,9 +1331,11 @@ class MainWindow(QMainWindow):
             end = seconds_or_none(time_range.get("end"))
             if start is None or end is None or end <= start:
                 continue
+            source = str(op.get("src") or "")
             overlap = sum(
                 max(0.0, min(end, right) - max(start, left))
-                for left, right in kept
+                for source_left, left, right in kept
+                if not source or source_left == source
             )
             if overlap / (end - start) >= 0.5:
                 continue
@@ -1099,6 +1353,9 @@ class MainWindow(QMainWindow):
         if self.current_ir is None:
             QMessageBox.information(self, "SmartCut", "当前没有可编辑的 EditIR。")
             return
+        if self._revision_submit_inflight:
+            self._set_status("正在保存版本，请稍候…")
+            return
         try:
             ir = self._build_draft_ir()
         except Exception as exc:
@@ -1108,6 +1365,8 @@ class MainWindow(QMainWindow):
         rejected = self._removed_segments(ir)
         if rejected:
             self.controller.record_segment_reject(rejected)
+        self._revision_submit_inflight = True
+        self._save_snapshot = self._capture_snapshot()
         self.controller.submit_revision(ir)
         self._set_status("正在保存新版本…")
 
@@ -1227,6 +1486,14 @@ class MainWindow(QMainWindow):
         self.media_tools_panel.set_running(True)
         self._set_status("正在提交转换/压缩任务…")
         self.controller.transcode(request)
+
+    def _on_understand(self, question: str) -> None:
+        if self.current_project is None:
+            QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
+            return
+        self.ai_panel.set_running(True)
+        self._set_status("正在理解视频内容（不修改时间线）…")
+        self.controller.understand_video(question.strip())
 
     def _on_ai_media_goal(self, goal: str) -> None:
         if self.current_project is None:
@@ -1390,6 +1657,8 @@ class MainWindow(QMainWindow):
             self.ai_panel.set_progress(job)
         elif kind in {"media_repair", "media_ops", "transcode"}:
             self.media_tools_panel.set_progress(job)
+        elif kind == "understand":
+            self.ai_panel.set_progress(job)
         self.progress.setValue(int(job.get("progress") or 0))
         self._set_status(
             f"{kind} · {job.get('status')} · {job.get('message') or ''}"
@@ -1410,6 +1679,8 @@ class MainWindow(QMainWindow):
             return
 
         if kind == "orchestrate":
+            self.ai_panel.set_running(False)
+        elif kind == "understand":
             self.ai_panel.set_running(False)
         elif kind == "render":
             result = job.get("result") or {}
@@ -1482,6 +1753,7 @@ class MainWindow(QMainWindow):
         self._set_status(f"证据定位：{seconds:.3f}s")
 
     def _on_segment_selected(self, _index: int, segment: dict) -> None:
+        self._bin_preview_src = None
         self.inspector_panel.show_segment(segment)
         try:
             start = float(segment.get("start"))
@@ -1489,6 +1761,7 @@ class MainWindow(QMainWindow):
         except (TypeError, ValueError):
             return
         self.preview_panel.set_loop(start, end)
+        self.preview_panel.seek(start)
         self._set_status(f"循环预览 {start:.2f}–{end:.2f}s；空格播放/暂停")
 
     def _on_captions_changed(self, payload: dict) -> None:
@@ -1668,6 +1941,42 @@ class MainWindow(QMainWindow):
             self._overlay_assets,
         )
         self._timing = self.timing_panel.payload()
+        self.timeline_panel.set_transitions(
+            self._timing.get("transitions") or []
+        )
+
+    def _on_track_states_changed(self, _states: dict) -> None:
+        if self.current_ir is None:
+            return
+        self._record_change()
+        self._set_status("视频轨控制已修改（未保存）")
+
+    def _on_timeline_transition(
+        self, after: str, seconds: float, transition_type: str
+    ) -> None:
+        if self.current_ir is None:
+            return
+        transitions = [
+            item
+            for item in (self._timing.get("transitions") or [])
+            if str(item.get("after")) != str(after)
+        ]
+        if seconds >= 0.05:
+            transitions.append(
+                {
+                    "after": after,
+                    "type": transition_type or "fade",
+                    "duration": RationalTime.from_seconds(
+                        f"{seconds:.6f}", rate=90_000
+                    ).model_dump(),
+                }
+            )
+        self._timing["transitions"] = transitions
+        self._record_change()
+        self._sync_timing_panel()
+        self._set_status(
+            "已删除转场" if seconds < 0.05 else f"转场 {seconds:.2f}s"
+        )
 
     def _on_timing_changed(self, payload: dict) -> None:
         if self.current_ir is None:
@@ -1727,11 +2036,11 @@ class MainWindow(QMainWindow):
         path = result.get("path")
         if path and Path(path).exists():
             self._showing_output = True
-            self.preview_panel.load_media(path, "特效预览（480p）")
+            self.preview_panel.load_media(path, "时间线预览（480p）")
             state = "缓存命中" if result.get("cached") else "已生成"
             warnings = result.get("warnings") or []
             suffix = f"（{len(warnings)} 条警告）" if warnings else ""
-            self._set_status(f"特效预览{state}{suffix}")
+            self._set_status(f"时间线预览{state}{suffix}")
 
     def _on_import_overlay_asset(self) -> None:
         if self.current_project is None:
@@ -1826,6 +2135,14 @@ class MainWindow(QMainWindow):
             return False
         key = event.key()
         modifiers = event.modifiers()
+        if key == Qt.Key.Key_Space and isinstance(
+            focus, (QAbstractButton, QComboBox, QSlider)
+        ):
+            return False
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right) and isinstance(
+            focus, QSlider
+        ):
+            return False
         if key == Qt.Key.Key_Space:
             self.preview_panel.toggle_play()
             return True
@@ -1835,8 +2152,24 @@ class MainWindow(QMainWindow):
         if key == Qt.Key.Key_Right:
             self._step_frames(1, coarse=bool(modifiers & Qt.KeyboardModifier.ShiftModifier))
             return True
-        if key == Qt.Key.Key_Delete:
+        if key in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.timeline_panel.delete_selected()
+            return True
+        if key == Qt.Key.Key_Home:
+            self.preview_panel.seek(0.0)
+            self.timeline_panel.set_position(0.0)
+            return True
+        if key == Qt.Key.Key_End:
+            duration = float(self.timeline_panel.duration or 0.0)
+            self.preview_panel.seek(duration)
+            self.timeline_panel.set_position(duration)
+            return True
+        if key == Qt.Key.Key_Escape:
+            self.timeline_panel.table.clearSelection()
+            self.preview_panel.clear_loop()
+            return True
+        if modifiers & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_B:
+            self.timeline_panel.split_selected()
             return True
         if modifiers & Qt.KeyboardModifier.ControlModifier and key == Qt.Key.Key_Z:
             if modifiers & Qt.KeyboardModifier.ShiftModifier:
@@ -1866,20 +2199,41 @@ class MainWindow(QMainWindow):
                 suffix = f"（{label}）" if label else ""
                 self._set_status(f"规划完成{suffix}，生成 revision {revision}")
         elif op == "revision" and isinstance(result, dict):
+            self._revision_submit_inflight = False
             revision = result.get("revision")
             if revision is not None:
-                self._session.mark_saved()
-                self.unsaved = False
-                self._set_status(f"已保存新版本 revision {revision}")
-                callback = self._pending_after_save
-                self._pending_after_save = None
-                if callback is not None:
-                    callback()
+                submitted = self._save_snapshot
+                changed_during_save = (
+                    submitted is not None
+                    and self._capture_snapshot() != submitted
+                )
+                self._save_snapshot = None
+                if not changed_during_save:
+                    self._session.mark_saved()
+                    self.unsaved = False
+                else:
+                    self.unsaved = True
+                suffix = "（保存期间有新的未保存修改）" if changed_during_save else ""
+                self._set_status(
+                    f"已保存新版本 revision {revision}{suffix}"
+                )
+                if not changed_during_save:
+                    callback = self._pending_after_save
+                    self._pending_after_save = None
+                    if callback is not None:
+                        callback()
         elif op == "ingest":
             self._set_status("素材已复制到工作区")
         elif op == "transcribe" and isinstance(result, dict):
             state = "（降级）" if result.get("degraded") else ""
             self._set_status(f"转写完成{state}")
+        elif op == "understand" and isinstance(result, dict):
+            self.ai_panel.set_running(False)
+            self.ai_panel.set_understanding(result)
+            self._set_status(
+                "理解完成"
+                + ("（LLM）" if result.get("llm_used") else "（规则总结）")
+            )
         elif op in {"transcode", "media_repair", "media_ops"} and isinstance(result, dict):
             self.media_tools_panel.set_running(False)
             self.media_tools_panel.show_result(result)
@@ -1942,6 +2296,92 @@ class MainWindow(QMainWindow):
         )
         if ok and name.strip():
             self.controller.create_project(name.strip())
+
+    def _on_add_media(self) -> None:
+        if self.current_project is None:
+            QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "添加素材到 bin",
+            "",
+            "媒体文件 (*.mp4 *.mov *.mkv *.avi *.mp3 *.m4a *.wav *.flac);;所有文件 (*)",
+        )
+        if path:
+            self._set_status("正在添加素材到 bin…")
+            self.controller.add_media_asset(path)
+
+    def _on_add_pip(self, asset: dict | None) -> None:
+        if not asset or self.current_ir is None:
+            return
+        timeline_start = float(self.timeline_panel.timeline.position or 0.0)
+        self.timeline_panel.add_pip_clip(asset, timeline_start)
+        self._refresh_preview_pip_overlays()
+        self._record_change()
+        self._set_status(
+            f"已添加画中画：{asset.get('name') or asset.get('src')} "
+            f"@ {timeline_start:.2f}s"
+        )
+
+    def _refresh_preview_pip_overlays(self) -> None:
+        overlays = [
+            {
+                "id": segment.get("id"),
+                "x": (segment.get("transform") or {}).get("x", 0.0),
+                "y": (segment.get("transform") or {}).get("y", 0.0),
+                "width": (segment.get("transform") or {}).get("width", 1.0),
+                "height": (segment.get("transform") or {}).get("height", 1.0),
+                "opacity": (segment.get("transform") or {}).get("opacity", 1.0),
+            }
+            for segment in self.timeline_panel.segments()
+            if int(segment.get("track") or 0) > 0
+        ]
+        overlays.extend(self._pips)
+        self.preview_panel.set_pips(overlays)
+
+    def _on_pip_transform_changed(
+        self, pip_id: str, transform: dict | None
+    ) -> None:
+        if not pip_id or not isinstance(transform, dict):
+            return
+        if self.timeline_panel.update_segment_transform(
+            pip_id, transform
+        ):
+            self._refresh_preview_pip_overlays()
+            self._record_change()
+            self._set_status(
+                f"画中画已调整：x={transform.get('x', 0):.2f} "
+                f"y={transform.get('y', 0):.2f}"
+            )
+            return
+        for pip in self._pips:
+            if str(pip.get("id")) == str(pip_id):
+                pip.update(transform)
+                self.timeline_panel.set_pips(self._pips)
+                self._refresh_preview_pip_overlays()
+                self._record_change()
+                self._set_status(
+                    f"画中画已调整：x={transform.get('x', 0):.2f} "
+                    f"y={transform.get('y', 0):.2f}"
+                )
+                return
+
+    def _on_bin_asset_selected(self, asset: dict | None) -> None:
+        if not asset or self.current_project is None:
+            return
+        src = str(asset.get("src") or "")
+        workspace = self.current_project.get("workspace_dir")
+        if not src or not workspace:
+            return
+        path = Path(workspace) / src
+        if not path.is_file():
+            return
+        self._showing_output = False
+        self._bin_preview_src = src
+        self.preview_panel.load_media(
+            str(path),
+            f"素材预览 · {asset.get('name') or Path(src).stem}",
+        )
 
     def _on_import(self) -> None:
         if self.current_project is None:
@@ -2079,6 +2519,8 @@ class MainWindow(QMainWindow):
         """后台任务错误只做非阻塞提示；离屏环境绝不弹模态框。"""
         text = str(message or "未知错误")
         _LOG.error("desktop_error", error=text)
+        self._revision_submit_inflight = False
+        self.ai_panel.set_running(False)
         self.media_tools_panel.set_running(False)
         self._set_status(f"错误：{text}")
         self.status_label.setStyleSheet("color: #e5484d;")

@@ -225,23 +225,40 @@ def lower(
     if preview_scale is not None:
         post_filters.append(preview_scale)
     effects_present = bool(effect_pre or post_filters)
-    segment_filters = [
-        build_segment_filters(
+    source_map = {facts.src: facts, **ir.source_facts}
+    multi_source = len(source_map) > 1
+    segment_filters: list[list[str]] = []
+    for op in ir.sequence:
+        op_facts = source_map.get(op.src, facts)
+        filters = build_segment_filters(
             ir.effects,
             segment_id=op.id,
             duration=op.output_duration(),
-            fps=facts.fps,
-            width=facts.video.width,
-            height=facts.video.height,
+            fps=op_facts.fps,
+            width=op_facts.video.width if op_facts.video else facts.video.width,
+            height=op_facts.video.height if op_facts.video else facts.video.height,
         )
-        for op in ir.sequence
-    ]
+        if multi_source and (
+            op_facts.width != facts.width
+            or op_facts.height != facts.height
+        ):
+            filters.append(
+                f"scale={post_width}:{post_height}:"
+                "force_original_aspect_ratio=decrease,"
+                f"pad={post_width}:{post_height}:(ow-iw)/2:(oh-ih)/2"
+            )
+        segment_filters.append(filters)
     any_segment_filters = any(segment_filters)
     enabled_effects = [effect for effect in ir.effects if effect.enabled]
     if enabled_effects and not effects_present and not any_segment_filters:
         warnings.append("特效参数均为默认值，未产生视频滤镜")
 
-    cues = build_cues(ir, transcript)
+    caption_transcript = transcript
+    if multi_source and ir.subtitles is None:
+        caption_transcript = None
+        if ir.export.burn_captions:
+            warnings.append("多素材时间线不自动映射跨源字幕；请使用手动字幕")
+    cues = build_cues(ir, caption_transcript)
     burn_captions = ir.export.burn_captions and bool(cues)
     if ir.export.burn_captions and not cues:
         warnings.append("请求烧录字幕，但没有可用手动字幕/转写时间戳")
@@ -283,16 +300,25 @@ def lower(
         {"encoder": encoder.model_dump(mode="json")} if encoder is not None else {}
     )
 
+    needs_pip = bool(ir.pips)
+    absolute = ir.absolute_timeline()
     single_segment = len(ir.sequence) == 1
     transition_by_after = {item.after: item for item in ir.transitions}
     segment_paths: list[str] = []
     for index, op in enumerate(ir.sequence):
-        if single_segment and not needs_post and not use_mixer:
+        if (
+            single_segment
+            and not absolute
+            and not needs_post
+            and not use_mixer
+            and not needs_pip
+        ):
             dst = output_path
         else:
             dst = f"{base_dir}/seg_{index:03d}.mp4"
+        op_facts = source_map.get(op.src, facts)
         cut_args: dict = {
-            "src": facts.src,
+            "src": op.src,
             "dst": dst,
             "start": rt_to_dict(op.range.start),
             "end": rt_to_dict(op.range.end),
@@ -314,9 +340,20 @@ def lower(
             ),
             **encoder_args,
         }
+        if absolute or multi_source or op_facts.fps != facts.fps:
+            cut_args["fps"] = facts.fps
+        if absolute or multi_source:
+            cut_args.update(
+                {
+                    "has_audio": op_facts.has_audio,
+                    "ensure_audio": True,
+                    "audio_sample_rate": 48_000,
+                    "audio_channels": 2,
+                }
+            )
         if op.speed != 1.0:
             cut_args["speed"] = op.speed
-            cut_args["has_audio"] = facts.has_audio
+            cut_args["has_audio"] = op_facts.has_audio
         if segment_filters[index]:
             cut_args["video_filters"] = segment_filters[index]
         calls.append(
@@ -329,12 +366,201 @@ def lower(
         )
         segment_paths.append(dst)
 
-    if single_segment:
+    if absolute:
+        def clip_payload(index: int, op) -> dict:
+            return {
+                "id": op.id or "",
+                "src": segment_paths[index],
+                "timeline_start": rt_to_dict(op.timeline_start),
+                "duration": rt_to_dict(op.output_duration()),
+                "track": op.track,
+                "x": op.transform.x if op.transform is not None else 0.0,
+                "y": op.transform.y if op.transform is not None else 0.0,
+                "width": op.transform.width if op.transform is not None else 1.0,
+                "height": op.transform.height if op.transform is not None else 1.0,
+                "opacity": op.transform.opacity if op.transform is not None else 1.0,
+                "keyframes": [
+                    {
+                        "t": rt_to_dict(keyframe.t),
+                        "x": keyframe.x,
+                        "y": keyframe.y,
+                        "width": keyframe.width,
+                        "height": keyframe.height,
+                        "opacity": keyframe.opacity,
+                    }
+                    for keyframe in op.keyframes
+                ],
+                "has_audio": True,
+            }
+
+        states = {
+            int(track): state for track, state in (ir.track_states or {}).items()
+        }
+        solo_tracks = {
+            track
+            for track, state in states.items()
+            if state.solo and not state.muted
+        }
+        active_tracks = {
+            op.track for op in ir.sequence if not states.get(op.track, None) or not states[op.track].muted
+        }
+        if solo_tracks:
+            active_tracks &= solo_tracks
+        track0_pairs = sorted(
+            [
+                (index, op)
+                for index, op in enumerate(ir.sequence)
+                if op.track == 0 and op.track in active_tracks
+            ],
+            key=lambda pair: pair[1].timeline_start.as_fraction(),
+        )
+        overlay_pairs = [
+            (index, op)
+            for index, op in enumerate(ir.sequence)
+            if op.track > 0 and op.track in active_tracks
+        ]
+        active_pairs = [
+            (index, op)
+            for index, op in enumerate(ir.sequence)
+            if op.track in active_tracks
+        ]
+        track0_ids = {op.id for _, op in track0_pairs if op.id}
+        track0_transitions = any(
+            item.after in track0_ids for item in ir.transitions
+        )
+        if ir.transitions and track0_pairs and track0_transitions:
+            base_dst = (
+                output_path
+                if not overlay_pairs and not needs_post and not use_mixer and not needs_pip
+                else f"{base_dir}/track0.mp4"
+            )
+            zero = RationalTime(value=0, rate=90_000)
+            compose_transitions = []
+            for position, (index, op) in enumerate(track0_pairs[:-1]):
+                spec = transition_by_after.get(op.id) if op.id else None
+                compose_transitions.append(
+                    {
+                        "type": spec.type if spec is not None else "fade",
+                        "duration": rt_to_dict(
+                            spec.duration if spec is not None else zero
+                        ),
+                        "audio_curve": (
+                            spec.audio_curve if spec is not None else "tri"
+                        ),
+                    }
+                )
+            calls.append(
+                ToolCall(
+                    seq=len(calls),
+                    tool="compose",
+                    args={
+                        "inputs": [segment_paths[index] for index, _ in track0_pairs],
+                        "durations": [
+                            rt_to_dict(op.output_duration())
+                            for _, op in track0_pairs
+                        ],
+                        "transitions": compose_transitions,
+                        "dst": base_dst,
+                        "has_audio": facts.has_audio,
+                        "fps": facts.fps,
+                        "video_codec": "libx264",
+                        "preset": "veryfast",
+                        "crf": 18,
+                        "audio_codec": "aac",
+                        "audio_bitrate": "192k",
+                        "video_track_timescale": 90_000,
+                        "fps_mode": "cfr",
+                        **encoder_args,
+                    },
+                    description=f"主轨转场合成：{len(ir.transitions)} 个转场",
+                )
+            )
+            current = base_dst
+            if overlay_pairs:
+                timeline_dst = (
+                    output_path
+                    if not needs_post and not use_mixer and not needs_pip
+                    else f"{base_dir}/timeline.mp4"
+                )
+                calls.append(
+                    ToolCall(
+                        seq=len(calls),
+                        tool="timeline_compose",
+                        args={
+                            "clips": [
+                                clip_payload(index, op)
+                                for index, op in overlay_pairs
+                            ],
+                            "transitions": [
+                                {
+                                    "after": item.after,
+                                    "type": item.type,
+                                    "duration": rt_to_dict(item.duration),
+                                    "audio_curve": item.audio_curve,
+                                }
+                                for item in ir.transitions
+                            ],
+                            "base": base_dst,
+                            "dst": timeline_dst,
+                            "width": post_width,
+                            "height": post_height,
+                            "total_duration": rt_to_dict(ir.total_duration()),
+                            "fps": facts.fps,
+                            "video_codec": "libx264",
+                            "preset": "veryfast",
+                            "crf": 18,
+                            "audio_codec": "aac",
+                            "audio_bitrate": "192k",
+                        },
+                        description="叠加轨合成",
+                    )
+                )
+                current = timeline_dst
+        else:
+            timeline_dst = (
+                output_path
+                if not needs_post and not use_mixer and not needs_pip
+                else f"{base_dir}/timeline.mp4"
+            )
+            calls.append(
+                ToolCall(
+                    seq=len(calls),
+                    tool="timeline_compose",
+                    args={
+                        "clips": [
+                            clip_payload(index, op)
+                            for index, op in active_pairs
+                        ],
+                        "transitions": [
+                            {
+                                "after": item.after,
+                                "type": item.type,
+                                "duration": rt_to_dict(item.duration),
+                                "audio_curve": item.audio_curve,
+                            }
+                            for item in ir.transitions
+                        ],
+                        "dst": timeline_dst,
+                        "width": post_width,
+                        "height": post_height,
+                        "total_duration": rt_to_dict(ir.total_duration()),
+                        "fps": facts.fps,
+                        "video_codec": "libx264",
+                        "preset": "veryfast",
+                        "crf": 18,
+                        "audio_codec": "aac",
+                        "audio_bitrate": "192k",
+                    },
+                    description=f"绝对时间线合成：{len(ir.sequence)} 个 clip",
+                )
+            )
+            current = timeline_dst
+    elif single_segment:
         current = segment_paths[0]
     else:
         assembled = (
             output_path
-            if not needs_post and not use_mixer
+            if not needs_post and not use_mixer and not needs_pip
             else f"{base_dir}/assembled.mp4"
         )
         if ir.transitions:
@@ -347,6 +573,9 @@ def lower(
                         "type": spec.type if spec is not None else "fade",
                         "duration": rt_to_dict(
                             spec.duration if spec is not None else zero
+                        ),
+                        "audio_curve": (
+                            spec.audio_curve if spec is not None else "tri"
                         ),
                     }
                 )
@@ -390,6 +619,47 @@ def lower(
                 )
             )
         current = assembled
+
+    if needs_pip:
+        pip_dst = (
+            output_path
+            if not needs_post and not use_mixer
+            else f"{base_dir}/pip.mp4"
+        )
+        calls.append(
+            ToolCall(
+                seq=len(calls),
+                tool="pip_overlay",
+                args={
+                    "src": current,
+                    "dst": pip_dst,
+                    "pips": [
+                        {
+                            "src": pip.src,
+                            "source_start": rt_to_dict(pip.source_start),
+                            "source_end": rt_to_dict(pip.source_end),
+                            "timeline_start": rt_to_dict(pip.timeline_start),
+                            "duration": rt_to_dict(pip.duration),
+                            "x": pip.x,
+                            "y": pip.y,
+                            "width": pip.width,
+                            "height": pip.height,
+                            "opacity": pip.opacity,
+                            "z": pip.z,
+                        }
+                        for pip in ir.pips
+                    ],
+                    "width": post_width,
+                    "height": post_height,
+                    "fps": facts.fps,
+                    "video_codec": "libx264",
+                    "preset": "veryfast",
+                    "crf": 18,
+                },
+                description=f"画中画叠加：{len(ir.pips)} 个",
+            )
+        )
+        current = pip_dst
 
     if ir.audio.remove_filler:
         warnings.append("remove_filler 需由 AudioAgent 局部修复；Compiler 不会静默删减音频")

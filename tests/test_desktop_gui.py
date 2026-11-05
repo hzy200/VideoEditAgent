@@ -129,6 +129,35 @@ def test_timeline_edit_split_delete_move_undo_redo(app) -> None:
     assert panel.segments()[2]["tag"] == "new"
 
 
+def test_timeline_widget_selection_enables_edit_buttons(app) -> None:
+    panel = TimelinePanel()
+    panel.set_ir(make_ir())
+    panel._on_widget_selected(0, panel.segments()[0])
+    assert panel.table.currentRow() == 0
+    for button in (
+        panel.delete_button,
+        panel.split_button,
+        panel.up_button,
+        panel.down_button,
+    ):
+        assert button.isEnabled()
+    panel.table.selectRow(1)
+    before = panel.table.rowCount()
+    panel.add_button.click()
+    assert panel.table.rowCount() == before + 1
+
+
+def test_timeline_invalid_cell_edit_keeps_segment(app) -> None:
+    panel = TimelinePanel()
+    panel.set_ir(make_ir())
+    assert panel.table.rowCount() == 2
+    panel.table.item(0, 2).setText("abc")
+    app.processEvents()
+    assert panel.table.rowCount() == 2
+    assert panel.segments()[0]["start"] == pytest.approx(1.0)
+    assert "数字" in panel.status_label.text()
+
+
 def test_timeline_audio_waveforms_reuse_main_peaks(app) -> None:
     widget = TimelineWidget()
     widget.set_audio_waveforms({"main": [0.1, 0.9], "assets": {}})
@@ -140,7 +169,7 @@ def test_timeline_and_inspector_show_rationale(app) -> None:
     ir["sequence"][0]["rationale"] = "命中主题"
     panel = TimelinePanel()
     panel.set_ir(ir)
-    assert panel.table.item(0, 4).text() == "命中主题"
+    assert panel.table.item(0, 5).text() == "命中主题"
     assert panel.segments()[0]["rationale"] == "命中主题"
 
     inspector = InspectorPanel()
