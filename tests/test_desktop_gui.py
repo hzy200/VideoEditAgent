@@ -129,6 +129,12 @@ def test_timeline_edit_split_delete_move_undo_redo(app) -> None:
     assert panel.segments()[2]["tag"] == "new"
 
 
+def test_timeline_audio_waveforms_reuse_main_peaks(app) -> None:
+    widget = TimelineWidget()
+    widget.set_audio_waveforms({"main": [0.1, 0.9], "assets": {}})
+    assert widget.waveform == [0.1, 0.9]
+
+
 def test_timeline_and_inspector_show_rationale(app) -> None:
     ir = make_ir()
     ir["sequence"][0]["rationale"] = "命中主题"

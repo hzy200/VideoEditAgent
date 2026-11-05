@@ -261,6 +261,16 @@ python scripts/benchmark_evidence_render.py --tiles 9 --repeat 3 \
   --kind temporal_diff --assert-not-slower
 ```
 
+GUI 端到端探针（真实 MainWindow + 合成素材）：
+
+```bash
+QT_QPA_PLATFORM=offscreen python scripts/gui_workflow_probe.py
+```
+
+输出窗口构造/显示、项目打开、标签切换、时间线编辑、候选检索、证据生成、
+编排与渲染各阶段耗时；同时检查 open_project/proxy/audio_waveforms 是否去重、
+无 PermissionError。耗时随机器与缓存状态变化。
+
 ## 打包 Windows exe
 
 ```powershell
@@ -442,7 +452,7 @@ conda activate video_edit
 python -m pytest -q
 ```
 
-当前结果：**560 collected，551 passed + 9 skipped（live/CI 专项/本地模型/无 GL）**。
+当前结果：**563 collected，554 passed + 9 skipped（live/CI 专项/本地模型/无 GL）**。
 默认测试不访问网络：契约、golden、ffmpeg 工具链、代理生成、
 OpenCV 镜头/质量/人脸/contact sheet、9:16、字幕映射与烧录、响度实测、
 内容寻址缓存、分块转写、章节化、候选片段与 FTS5 检索、Critic 局部重规划、
@@ -487,7 +497,11 @@ P0–P2 语义/证据新增回归覆盖：
   HSV 镜头聚类；
 - 统一指纹：`dhash:v2`/engine、Pillow fallback、CPU/GL 语义比对；
 - 渲染/测量：`render_many/synthesize_many`、GpuMeasurer CPU 等价/容差/回退、
-  `measure_backend` 不参与 `render_hash`。
+  `measure_backend` 不参与 `render_hash`；
+- GUI 端到端：真实 MainWindow 打开项目、切换全部工作区、候选检索、证据生成、
+  时间线拆分/撤销、离线编排、revision 加载与真实渲染；
+- 前端并发：`open_project`/`proxy`/`audio_waveforms` 单飞，主素材波形复用
+  `build_audio_waveforms`，避免重复 ffmpeg 与 Windows 原子替换竞争。
 
 CI（`.github/workflows/ci.yml`）在 windows-latest 安装
 `.[dev,desktop,transcribe,vision,server]`（`vision` 是测试收集期必需）并执行：

@@ -108,6 +108,7 @@
 | 101 | dHash/直方图必须来自单一 `fingerprint.py`；版本与 engine 进入证据/质量/候选缓存键；cv2 缺失时保留 Pillow fallback | `perception/view/fingerprint.py`、`measure.py`、`hash.py`、`quality.py`、`frames.py`；`tests/test_fingerprint.py` |
 | 102 | `render_many` 只做拼版/编号/bbox，一次 context + 解码图片缓存；不得在 shader/渲染器内计算光流或直方图 | `perception/view/renderer.py`、`render_cpu.py`、`desktop/view/render_qtgl.py`、`synthesizer.py`；`tests/test_evidence_render_cpu.py`、`tests/test_gl_renderer.py` |
 | 103 | GpuMeasurer 与 renderer 解耦，只输出数值 MeasureResult；必须有 CPU 等价路径与容差比对，失败回退 CPU 并记录 `measure_backend`；`measure_backend` 不参与 render_hash | `perception/view/measure_gpu.py`、`services/evidence.py::_measure_view`、`contracts/visual_evidence.py`；`tests/test_gpu_measure.py` |
+| 104 | 项目打开期间 `open_project`/`proxy`/`audio_waveforms` 必须单飞去重；主素材波形复用 `build_audio_waveforms` 的 main peaks，不得并发重复 `build_waveform` | `desktop/controller.py::_open_inflight/_proxy_inflight/_waveform_inflight`、`desktop/main_window.py`、`desktop/widgets/timeline_widget.py`；`tests/test_gui_workflow.py`、`tests/test_desktop_gui.py` |
 
 ## 新增功能的检查清单
 

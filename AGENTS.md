@@ -118,6 +118,9 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
 - GpuMeasurer 必须与 renderer 解耦，只输出数值 MeasureResult；必须有 CPU 等价
   路径与容差比对，失败回退 CPU 并记录 `measure_backend`；该字段不得进入
   `render_hash`。
+- 项目打开期间重复的 `open_project`/`proxy`/`audio_waveforms` 必须在
+  `DesktopController` 单飞去重；主素材波形必须复用 `build_audio_waveforms`
+  的结果，不得再并发调用 `build_waveform`。
 - `src/smartcut/policies/*.json` 与代码同步；新增 agent/tool/encoder 时
   必须更新策略并运行 `scripts/check_drift.py`。
 - 新增数据库列/表必须提供只增不删的迁移与旧库测试。

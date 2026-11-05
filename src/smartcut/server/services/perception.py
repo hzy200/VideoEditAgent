@@ -854,6 +854,7 @@ class PerceptionMixin:
 
     def build_chapters(self, project_id: str, cancel_token=None) -> dict:
         asset = self._require_asset(project_id)
+        workspace = self.workspaces.get(project_id)
         facts = MediaFacts.model_validate_json(asset.facts_json)
         cache = self._cache_for(project_id)
         source_hash = self._source_hash(project_id, asset)

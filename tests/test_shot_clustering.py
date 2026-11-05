@@ -27,6 +27,43 @@ def _frame(workspace: Path, name: str, color: str, offset: int) -> FrameRef:
     return FrameRef(index=int(offset), t=_rt(str(offset)), path=f"frames/{name}")
 
 
+def test_service_build_chapters_passes_workspace_to_cluster(
+    settings,
+    synthetic_video: Path,
+    monkeypatch,
+) -> None:
+    from smartcut.perception.transcribe import NullTranscriber
+    from smartcut.server.db import Database
+    from smartcut.server.jobs import JobService
+    from smartcut.server.services import Services
+    import smartcut.server.services.perception as perception_service
+
+    calls: list[Path] = []
+
+    def fake_cluster(shots, frames, workspace_root, duration, *, similarity):
+        calls.append(Path(workspace_root))
+        return []
+
+    monkeypatch.setattr(
+        perception_service.cluster_mod, "cluster_shots", fake_cluster
+    )
+    db = Database(settings.db_path)
+    db.init()
+    jobs = JobService(db, 1)
+    services = Services(settings, db, jobs, transcriber=NullTranscriber())
+    try:
+        project_id = services.create_project("cluster-service")["id"]
+        services.ingest(project_id, str(synthetic_video))
+        services.extract_frames(project_id)
+        services.detect_scenes(project_id)
+        services.build_chapters(project_id)
+        assert calls and calls[0].exists()
+    finally:
+        services.close()
+        jobs.shutdown(wait=True)
+        db.dispose()
+
+
 def test_cluster_shots_merges_similar_frames(tmp_path: Path) -> None:
     frames = [
         _frame(tmp_path, "a.jpg", "#1a1a2e", 0),

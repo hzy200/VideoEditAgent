@@ -73,6 +73,9 @@ class DesktopController(QObject):
         self._current_project: str | None = None
         self._watched: dict[str, dict[str, Any]] = {}
         self._jobs_poll_inflight = False
+        self._open_inflight: str | None = None
+        self._waveform_inflight: set[str] = set()
+        self._proxy_inflight: set[str] = set()
         self._effects_preview_token: CancellationToken | None = None
 
         self._poll = QTimer(self)
@@ -120,6 +123,12 @@ class DesktopController(QObject):
             self.logger.warning("desktop_jobs_poll_failed", error=error)
             return
         self.logger.error("desktop_task_failed", op=op, error=error)
+        if op == "open_project":
+            self._open_inflight = None
+        elif op == "audio_waveforms":
+            self._waveform_inflight.clear()
+        elif op == "proxy":
+            self._proxy_inflight.clear()
         self.error.emit(f"{op}: {error}")
         self.operation_done.emit(f"{op}_failed", {"error": error})
 
@@ -131,14 +140,18 @@ class DesktopController(QObject):
             self.refresh_projects()
             self.open_project(result["id"])
         elif op == "open_project":
-            if result["project"]["id"] != current:
+            opened_id = result["project"]["id"]
+            if self._open_inflight == opened_id:
+                self._open_inflight = None
+            if opened_id != current:
                 return
             self.project_opened.emit(result["project"])
             self.revisions_changed.emit(result["revisions"])
             self.runs_changed.emit(result["runs"])
             self.artifacts_changed.emit(result["artifacts"])
             self.perception_changed.emit(result.get("perception") or {})
-            self.audio_assets_changed.emit(result.get("audio_assets") or [])
+            # project_opened 已经填充音频素材并触发一次波形构建；
+            # 不再重复发 audio_assets_changed，避免清空/重复任务。
             self.refresh_preference(result["project"]["id"])
             if result.get("outline"):
                 self.outline_ready.emit(result["outline"])
@@ -148,7 +161,7 @@ class DesktopController(QObject):
             if proxy.get("proxy"):
                 workspace = self.services.project_workspace(current)
                 self.proxy_ready.emit(str(workspace.resolve(proxy["proxy"])))
-            if result["project"].get("asset"):
+            if result["project"].get("asset") and not proxy.get("proxy"):
                 self.build_proxy(result["project"]["id"])
         elif op == "list_revisions":
             if result["project_id"] == current:
@@ -174,6 +187,7 @@ class DesktopController(QObject):
             if result.get("project_id") == current:
                 self.overlay_assets_changed.emit(result.get("items") or [])
         elif op == "audio_waveforms":
+            self._waveform_inflight.discard(result.get("project_id"))
             if result.get("project_id") == current:
                 self.audio_waveforms_changed.emit(result.get("data") or {})
         elif op == "preview_mix":
@@ -186,6 +200,7 @@ class DesktopController(QObject):
             ):
                 self.effects_preview_ready.emit(result.get("data") or {})
         elif op == "proxy":
+            self._proxy_inflight.discard(result.get("project_id"))
             proxy = result.get("proxy")
             project_id = result.get("project_id")
             if proxy and project_id and project_id == current:
@@ -299,6 +314,9 @@ class DesktopController(QObject):
         self._run("create_project", lambda: self.services.create_project(name))
 
     def open_project(self, project_id: str) -> None:
+        if self._open_inflight == project_id:
+            return
+        self._open_inflight = project_id
         self._current_project = project_id
 
         def load_bundle() -> dict:
@@ -465,8 +483,9 @@ class DesktopController(QObject):
 
     def load_audio_waveforms(self) -> None:
         pid = self._current_project
-        if not pid:
+        if not pid or pid in self._waveform_inflight:
             return
+        self._waveform_inflight.add(pid)
         self._run(
             "audio_waveforms",
             lambda: {
@@ -557,8 +576,9 @@ class DesktopController(QObject):
 
     def build_proxy(self, project_id: str | None = None) -> None:
         pid = project_id or self._current_project
-        if not pid:
+        if not pid or pid in self._proxy_inflight:
             return
+        self._proxy_inflight.add(pid)
 
         def proxy() -> dict:
             result = self.services.create_proxy(pid)

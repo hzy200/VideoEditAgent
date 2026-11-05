@@ -264,7 +264,34 @@ python scripts/benchmark_evidence_render.py --tiles 9 --repeat 3 \
 - `ArtifactCache` 的哈希缓存与 `_project_caches` 均有锁，避免并发重复哈希
   或创建多个 cache 实例。
 
-## 13. 验证命令
+## 13. GUI 前端性能与端到端探针
+
+`scripts/gui_workflow_probe.py` 用真实 `MainWindow` + 合成 4s 素材执行：
+窗口构造/显示 → 打开项目 → 切换全部工作区 → 时间线编辑 → 候选检索 →
+证据生成 → 离线编排（不渲染）→ revision 加载 → 真实渲染。
+
+本机（Windows、offscreen、合成 640x360@30 素材）参考：
+
+- SettingsStore ≈0.25s；MainWindow 构造+show ≈1.3–2.0s；
+- 已预构建项目打开 ≈0.03–0.05s；4 个工作区切换 ≈0.25–0.4s；
+- 候选检索 ≈0.03–0.09s；证据生成 ≈2.7–3.7s（后台任务）；
+- 离线编排 no-render ≈4.4–6.1s（后台 Job）；2s 成片渲染 ≈1.0–1.4s。
+
+前端并发修正：
+
+- `open_project` / `proxy` / `audio_waveforms` 在 `DesktopController` 单飞去重；
+- 主素材波形复用 `build_audio_waveforms` 的 `main` peaks，
+  `TimelineWidget.set_audio_waveforms` 不再触发第二次 `build_waveform`；
+- 已有 proxy 时 `open_project` 不再重复构建；
+- `build_chapters` 修复了镜头聚类所需的 workspace 变量；
+- UI 线程只提交任务，SQLite/ffmpeg/文件解码都在工作线程；
+  探针断言无 `PermissionError`/重复 `open_project`/`proxy`/`audio_waveforms`。
+
+```bash
+QT_QPA_PLATFORM=offscreen python scripts/gui_workflow_probe.py
+```
+
+## 14. 验证命令
 
 ```bash
 conda activate video_edit

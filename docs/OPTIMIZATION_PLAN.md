@@ -1,7 +1,7 @@
 # SmartCut 工作流与性能优化计划
 
 - 状态：P0/P1/P2/P3 已完成（2026-11-02）；后续视觉证据层见 `docs/VISION.md`，
-  最新测试基线以 README 为准（560 collected / 551 passed + 9 skipped）
+  最新测试基线以 README 为准（563 collected / 554 passed + 9 skipped）
 - 日期：2026-11-02
 - 范围：视频理解、抽帧与 VLM、结构化元数据、并行/GPU、测试与回归
 - 关联文档：`docs/PERFORMANCE.md`、`docs/VISION.md`、`docs/MEDIA_PIPELINE.md`
@@ -19,7 +19,7 @@
 - 两阶段大纲、硬件编码、Proxy-first；
 - 多轨音频与 Demucs 伴生 worker（CUDA 已验证）；
 - 本轮历史基线：232 项全量测试（230 passed + 2 skipped），live 2 passed；
-  当前全量测试见 README（560 collected / 551 passed + 9 skipped）。
+  当前全量测试见 README（563 collected / 554 passed + 9 skipped）。
 
 但长视频、复杂画面和多模态调用仍存在成本和耗时压力，主要来自：
 
@@ -51,7 +51,7 @@
 ### 3.1 当前基线
 
 - 本轮历史默认测试：**232 collected，230 passed + 2 skipped（live）**；
-  当前基线：**560 collected，551 passed + 9 skipped**
+  当前基线：**563 collected，554 passed + 9 skipped**
 - live DeepSeek：**2 passed**
 - `scripts/check_drift.py`：通过
 - 开发态 `--smoke-test`：退出 0

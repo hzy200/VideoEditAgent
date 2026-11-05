@@ -155,10 +155,25 @@
 - 转场/变速会改变成片时长，时间线仍按源区间展示，最终时长以渲染为准。
 - AI 重规划生成的新 revision 默认不继承手动转场/变速/水印；这些属于当前手工时间线。
 
+## 性能与完整流程回归
+
+- 项目打开期间 `open_project`/`proxy`/`audio_waveforms` 在 Controller 单飞；
+  主素材波形复用 `build_audio_waveforms` 的 main peaks，避免重复 ffmpeg 与
+  Windows 缓存原子替换竞争。
+- `tests/test_gui_workflow.py` 用真实 MainWindow 模拟：打开项目 → 切换全部
+  工作区 → 候选检索 → 证据生成 → 时间线拆分/撤销 → 离线编排 →
+  revision 加载 → 真实渲染，并断言无 `PermissionError`。
+- 手工性能探针：
+  ```bash
+  QT_QPA_PLATFORM=offscreen python scripts/gui_workflow_probe.py
+  ```
+  输出窗口构造/显示、项目打开、标签切换、证据、编排与渲染耗时。
+
 ## 测试
 
 ```bash
 python -m pytest -q tests/test_desktop_gui.py
+python -m pytest -q tests/test_gui_workflow.py
 python -m pytest -q tests/test_project_admin.py
 python -m pytest -q tests/test_desktop_smoke.py
 ```

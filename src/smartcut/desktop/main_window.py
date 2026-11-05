@@ -829,12 +829,9 @@ class MainWindow(QMainWindow):
         self.ai_panel.set_project_enabled(project.get("asset") is not None)
         self.setWindowTitle(f"SmartCut — {project.get('name') or '未命名项目'}")
         self._set_status(f"已打开项目 {project.get('name') or project_id}")
-        if project.get("asset"):
-            self.controller.load_waveform()
 
     def _on_asset_changed(self, asset: dict) -> None:
         self._set_status("素材已复制到工作区并完成 probe")
-        self.controller.load_waveform()
 
     def _on_proxy_ready(self, path: str) -> None:
         if not self._showing_output:

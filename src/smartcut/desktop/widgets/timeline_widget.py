@@ -119,6 +119,12 @@ class TimelineWidget(QWidget):
         for asset_id, peaks in (payload.get("assets") or {}).items():
             waveforms[str(asset_id)] = list(peaks or [])
         self.audio_waveforms = waveforms
+        # 同一次 build_audio_waveforms 已包含主素材 peaks，复用它可避免
+        # 额外再跑一次 build_waveform（Windows 上还会与缓存原子替换竞争）。
+        if waveforms["main"]:
+            self.waveform = [
+                max(0.0, min(1.0, float(value))) for value in waveforms["main"]
+            ]
         self.update()
 
     def set_diff(self, added, removed, unchanged) -> None:
