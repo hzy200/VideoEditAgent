@@ -1,8 +1,10 @@
 """检查代码与机器可读 policy / schema / 打包配置是否漂移。
 
 守卫必须比较**独立事实源**：
-- 代码侧白名单（``ENCODER_CODECS``、``TOOLS``、``build_default_agents``、``Phase`` Literal）
-- 策略文件（``agents.json`` / ``tools.json`` / ``encoding.json`` / ``workflow.json``）
+- 代码侧白名单（``ENCODER_CODECS``、``TOOLS``、``build_default_agents``、``Phase`` /
+  ``ViewKind`` Literal）
+- 策略文件（``agents.json`` / ``tools.json`` / ``encoding.json`` / ``vision.json`` /
+  ``workflow.json``）
 
 禁止用“由 policy 派生、再和同一 policy 比较”的恒等式。
 
@@ -19,6 +21,7 @@ from typing import get_args
 from smartcut.contracts.encoder import ENCODER_CODECS
 from smartcut.contracts.generate import MODELS
 from smartcut.contracts.templates import Phase
+from smartcut.contracts.visual_evidence import ViewKind
 from smartcut.orchestrator.agents import build_default_agents
 from smartcut.policy import load_policy
 from smartcut.runner.tools.registry import TOOLS
@@ -42,6 +45,37 @@ def check(policy=None) -> list[str]:
         errors.append("policy tools 与工具注册表不一致")
     if set(policy.encoding.codecs) != set(ENCODER_CODECS):
         errors.append("policy encoding codecs 与 EncoderProfile 白名单不一致")
+
+    # 视图路由：kind 的唯一代码事实源是 ViewKind Literal。
+    routing = policy.vision.routing
+    if routing is None:
+        errors.append("vision.json 缺少 routing 策略")
+    else:
+        kinds = set(get_args(ViewKind))
+        ids = [item.id for item in routing.types]
+        if len(ids) != len(set(ids)):
+            errors.append("vision.routing.types.id 存在重复")
+        if routing.default not in set(ids):
+            errors.append(
+                f"vision.routing.default 不在 types 中: {routing.default!r}"
+            )
+        for item in routing.types:
+            invalid = {item.primary, *item.extras} - kinds
+            if invalid:
+                errors.append(
+                    f"vision.routing[{item.id}] 引用未知 ViewKind: {sorted(invalid)}"
+                )
+            if item.primary in item.extras:
+                errors.append(
+                    f"vision.routing[{item.id}].extras 不能包含 primary"
+                )
+        default = next(
+            (item for item in routing.types if item.id == routing.default), None
+        )
+        if default is not None and default.primary != "contact_sheet":
+            errors.append(
+                "vision.routing.default 必须使用 contact_sheet 作为安全回退"
+            )
 
     # phase 名称的唯一代码事实源是 contracts.templates.Phase
     phase_names = set(get_args(Phase))
@@ -123,8 +157,13 @@ def check(policy=None) -> list[str]:
         "image_visual_notes",
         "encoder_profile",
         "edit_review",
+        "screen_text_report",
     } <= set(MODELS):
-        errors.append("contracts.generate.MODELS 缺少 Phase 3 契约")
+        errors.append("contracts.generate.MODELS 缺少 Phase 3/OCR 契约")
+
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    if "ocr = [" not in pyproject:
+        errors.append("pyproject 缺少 ocr optional extra")
 
     spec = (ROOT / "packaging" / "smartcut.spec").read_text(encoding="utf-8")
     if "smartcut/policies" not in spec:

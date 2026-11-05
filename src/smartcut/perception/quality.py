@@ -18,6 +18,7 @@ from smartcut.errors import (
     ToolExecutionError,
 )
 from smartcut.perception import process_pool
+from smartcut.perception.view import fingerprint
 
 _BATCH = 32
 
@@ -34,7 +35,7 @@ def _frame_metrics(path: Path, cv2, np, slot):
             "mean": float(gray.mean()),
             "std": float(gray.std()),
             "laplacian": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
-            "hash": _dhash(gray, cv2, np),
+            "hash": fingerprint.dhash_gray(gray, cv2, np),
             "gray": small,
         }
 
@@ -89,7 +90,10 @@ def analyze_quality(
             if diff < 1.0 and mean >= 25.0:
                 candidates.append(("frozen", min(1.0, 1.0 - diff), f"diff={diff:.2f}"))
         current_hash = metric["hash"]
-        if previous_hash is not None and _hamming(current_hash, previous_hash) <= 2:
+        if (
+            previous_hash is not None
+            and fingerprint.hamming(current_hash, previous_hash) <= 2
+        ):
             candidates.append(("duplicate", 0.8, "hash distance <= 2"))
         previous_gray = gray
         previous_hash = current_hash
@@ -185,16 +189,3 @@ def analyze_quality(
         marks=marks,
         engine=engine,
     )
-
-
-def _dhash(gray, cv2, np) -> int:
-    resized = cv2.resize(gray, (9, 8), interpolation=cv2.INTER_AREA)
-    bits = (resized[:, 1:] > resized[:, :-1]).flatten()
-    value = 0
-    for bit in bits:
-        value = (value << 1) | int(bit)
-    return value
-
-
-def _hamming(left: int, right: int) -> int:
-    return (left ^ right).bit_count()

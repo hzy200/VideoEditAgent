@@ -20,16 +20,26 @@ def build_chapters(
     faces: FaceReport | None,
     frames: list[FrameRef] | None,
     target_seconds: float = 300.0,
+    shot_clusters: list[tuple[float, float]] | None = None,
 ) -> ChapterPlan:
     duration = facts.duration.to_float()
     if duration <= 0:
         return ChapterPlan(src=facts.src, chapters=[], rationale="素材时长为 0")
 
-    cut_times = sorted(
+    all_cut_times = sorted(
         shot.t.to_float()
         for shot in (shots.shots if shots else [])
         if 0.0 < shot.t.to_float() < duration
     )
+    cut_times = all_cut_times
+    if shot_clusters:
+        # 只在视觉簇边界处分章，避免同一页 PPT 的内部切点拆出多章。
+        cluster_ends = [end for _start, end in shot_clusters if end < duration]
+        cut_times = [
+            moment
+            for moment in all_cut_times
+            if any(abs(moment - end) <= 0.5 for end in cluster_ends)
+        ]
     boundaries = [0.0]
     cursor = 0.0
     while cursor < duration - 0.5:
@@ -80,7 +90,9 @@ def build_chapters(
                 end=rt_from_seconds(end),
                 title=title,
                 summary=text[:300] if text else None,
-                shot_count=sum(1 for value in cut_times if start <= value < end),
+                shot_count=sum(
+                    1 for value in all_cut_times if start <= value < end
+                ),
                 quality_marks=sum(
                     1 for mark in quality_marks if start <= mark.t.to_float() < end
                 ),

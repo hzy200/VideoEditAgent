@@ -82,6 +82,10 @@ class Measurement(BaseModel):
     height: int = Field(default=0, ge=0)
     score: float = Field(default=0.0, ge=0.0, le=1.0)
     engine: str = "cpu"
+    # 全局相机运动与残差主体运动拆分（仅 flow 视图测量）。
+    camera_mag: float | None = Field(default=None, ge=0.0)
+    subject_mag: float | None = Field(default=None, ge=0.0)
+    camera_motion: str | None = None
 
 
 class MeasureResult(BaseModel):
@@ -170,7 +174,9 @@ REQUIRED_META_KEYS = frozenset(
         "device_tier",
     }
 )
-HASH_EXCLUDED_META_KEYS = frozenset({"backend", "device_tier"})
+HASH_EXCLUDED_META_KEYS = frozenset(
+    {"backend", "device_tier", "measure_backend"}
+)
 
 
 def _normalize(value: Any) -> Any:

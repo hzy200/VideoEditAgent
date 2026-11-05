@@ -14,6 +14,7 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import TimeoutError as MPTimeoutError
 
 from smartcut.errors import ToolExecutionError
+from smartcut.perception.view import fingerprint
 
 _CASCADE = None
 
@@ -170,7 +171,7 @@ def quality_metric(path: str) -> dict | None:
         "mean": float(gray.mean()),
         "std": float(gray.std()),
         "laplacian": float(cv2.Laplacian(gray, cv2.CV_64F).var()),
-        "hash": _dhash(gray, cv2),
+        "hash": fingerprint.dhash_gray(gray, cv2, np),
         "gray_bytes": small.tobytes(),
         "gray_shape": small.shape,
     }
@@ -204,12 +205,3 @@ def face_metric(payload: tuple[str, str]) -> dict | None:
         "height": height,
         "box": (int(x), int(y), int(w), int(h)),
     }
-
-
-def _dhash(gray, cv2) -> int:
-    resized = cv2.resize(gray, (9, 8), interpolation=cv2.INTER_AREA)
-    bits = (resized[:, 1:] > resized[:, :-1]).flatten()
-    value = 0
-    for bit in bits:
-        value = (value << 1) | int(bit)
-    return value

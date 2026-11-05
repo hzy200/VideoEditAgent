@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 
 from smartcut.contracts.visual_evidence import (
@@ -118,6 +119,26 @@ class QtEvidenceRenderer:
         self.device_tier = "gpu"
 
     def render(self, measure: MeasureResult, request: ViewRequest) -> RenderedImage:
+        return self._render(measure, request, {})
+
+    def render_many(
+        self,
+        measure: MeasureResult,
+        requests: list[ViewRequest],
+    ) -> list[RenderedImage]:
+        """同一 measure 的多个网格/kind 请求共享 context 与解码后的 QImage。"""
+        image_cache: dict[str, object] = {}
+        return [
+            self._render(measure, request, image_cache)
+            for request in requests
+        ]
+
+    def _render(
+        self,
+        measure: MeasureResult,
+        request: ViewRequest,
+        image_cache: dict[str, object],
+    ) -> RenderedImage:
         try:
             from PySide6.QtCore import QBuffer, QIODevice, QRectF, Qt
             from PySide6.QtGui import QColor, QImage, QPainter
@@ -157,9 +178,13 @@ class QtEvidenceRenderer:
                 measure.tile_images,
                 measure.measurements,
             ):
-                image = _qimage_from_bytes(image_bytes)
-                if image.isNull():
-                    continue
+                cache_key = hashlib.sha256(image_bytes).hexdigest()
+                image = image_cache.get(cache_key)
+                if image is None:
+                    image = _qimage_from_bytes(image_bytes)
+                    if image.isNull():
+                        continue
+                    image_cache[cache_key] = image
                 index = tile.index - 1
                 row = index // grid_cols
                 col = index % grid_cols

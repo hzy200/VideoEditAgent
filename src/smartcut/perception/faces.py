@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from pathlib import Path
 
-from smartcut.contracts.faces import FaceAnchor, FaceReport
+from smartcut.contracts.faces import FaceAnchor, FaceReport, FaceTrack
 from smartcut.contracts.perception import FrameRef
 from smartcut.errors import (
     PerceptionUnavailable,
@@ -18,6 +18,109 @@ from smartcut.errors import (
 from smartcut.perception import process_pool
 
 _THREAD_LOCAL = threading.local()
+TRACKING_VERSION = "iou@1.0"
+
+
+def _iou(left: FaceAnchor, right: FaceAnchor) -> float:
+    x1 = max(left.x, right.x)
+    y1 = max(left.y, right.y)
+    x2 = min(left.x + left.w, right.x + right.w)
+    y2 = min(left.y + left.h, right.y + right.h)
+    intersection = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+    union = left.w * left.h + right.w * right.h - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def _center_gap(left: FaceAnchor, right: FaceAnchor) -> float:
+    return max(
+        abs(left.center_x - right.center_x),
+        abs(left.center_y - right.center_y),
+    )
+
+
+def _clamp_box(x: float, y: float, w: float, h: float) -> tuple[float, float, float, float]:
+    w = max(0.001, min(1.0, w))
+    h = max(0.001, min(1.0, h))
+    x = max(0.0, min(1.0 - w, x))
+    y = max(0.0, min(1.0 - h, y))
+    return x, y, w, h
+
+
+def derive_tracks(anchors: list[FaceAnchor]) -> list[FaceTrack]:
+    groups: dict[int, list[FaceAnchor]] = {}
+    for anchor in anchors:
+        if anchor.track_id is None:
+            continue
+        groups.setdefault(anchor.track_id, []).append(anchor)
+    tracks: list[FaceTrack] = []
+    for track_id in sorted(groups):
+        values = sorted(groups[track_id], key=lambda item: item.t.as_fraction())
+        tracks.append(
+            FaceTrack(
+                track_id=track_id,
+                start=values[0].t,
+                end=values[-1].t,
+                frame_count=len(values),
+            )
+        )
+    return tracks
+
+
+def track_anchors(
+    anchors: list[FaceAnchor],
+    *,
+    iou_threshold: float = 0.3,
+    max_gap_seconds: float = 2.0,
+    smoothing_alpha: float = 0.4,
+) -> tuple[list[FaceAnchor], list[FaceTrack]]:
+    """centroid + IoU 关联，并对同一 track 做 EMA 平滑。"""
+    if not anchors:
+        return [], []
+    ordered = sorted(anchors, key=lambda item: item.t.as_fraction())
+    alpha = max(0.0, min(1.0, float(smoothing_alpha)))
+    state: list[float] | None = None
+    previous: FaceAnchor | None = None
+    track_id = -1
+    smoothed: list[FaceAnchor] = []
+    for anchor in ordered:
+        gap = (
+            anchor.t.to_float() - previous.t.to_float()
+            if previous is not None
+            else float("inf")
+        )
+        same = (
+            previous is not None
+            and gap <= max_gap_seconds
+            and (
+                _iou(previous, anchor) >= iou_threshold
+                or _center_gap(previous, anchor) <= 0.15
+            )
+        )
+        if not same:
+            track_id += 1
+            state = [anchor.x, anchor.y, anchor.w, anchor.h]
+        else:
+            assert state is not None
+            state = [
+                alpha * anchor.x + (1 - alpha) * state[0],
+                alpha * anchor.y + (1 - alpha) * state[1],
+                alpha * anchor.w + (1 - alpha) * state[2],
+                alpha * anchor.h + (1 - alpha) * state[3],
+            ]
+        x, y, w, h = _clamp_box(*state)
+        smoothed.append(
+            anchor.model_copy(
+                update={
+                    "x": x,
+                    "y": y,
+                    "w": w,
+                    "h": h,
+                    "track_id": track_id,
+                }
+            )
+        )
+        previous = anchor
+    return smoothed, derive_tracks(smoothed)
 
 
 def _detect_frame(path: Path, cascade_path: Path, slot):
@@ -63,6 +166,10 @@ def detect_faces(
     pool_slot=None,
     cancel_check: Callable[[], None] | None = None,
     pool_timeout_seconds: float | None = None,
+    tracking: bool = True,
+    track_iou_threshold: float = 0.3,
+    track_max_gap_seconds: float = 2.0,
+    smoothing_alpha: float = 0.4,
 ) -> FaceReport:
     if cancel_check is not None:
         cancel_check()
@@ -149,11 +256,22 @@ def detect_faces(
             )
         )
 
+    if tracking:
+        anchors, tracks = track_anchors(
+            anchors,
+            iou_threshold=track_iou_threshold,
+            max_gap_seconds=track_max_gap_seconds,
+            smoothing_alpha=smoothing_alpha,
+        )
+    else:
+        tracks = []
     return FaceReport(
         src=src,
         frame_width=frame_width,
         frame_height=frame_height,
         sampled_fps=sampled_fps,
         anchors=anchors,
+        tracks=tracks,
+        tracking_version=TRACKING_VERSION if tracking else "off",
         engine=engine,
     )

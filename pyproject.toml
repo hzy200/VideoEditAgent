@@ -42,6 +42,8 @@ vision = [
 exchange = ["opentimelineio>=0.17"]
 # 人声分离伴生 worker；GPU 用户需另行按 CUDA 版本安装 torch。
 separation = ["demucs==4.1.0"]
+# 屏幕文字 OCR；主程序不 import，worker 进程内懒加载。
+ocr = ["rapidocr-onnxruntime>=1.3"]
 packaging = ["pyinstaller>=6.10"]
 dev = [
     "pytest>=8.2",

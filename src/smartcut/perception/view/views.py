@@ -50,12 +50,19 @@ def build_temporal_diff(
             )
         )
         metrics.append(
-            {"flow_mag": flow.flow_mag, "flow_dir_deg": flow.flow_dir_deg}
+            {
+                "flow_mag": flow.flow_mag,
+                "flow_dir_deg": flow.flow_dir_deg,
+                "camera_mag": flow.camera_mag,
+                "subject_mag": flow.subject_mag,
+                "camera_motion": flow.camera_motion,
+            }
         )
         constants = {
             "flow_mag_cap": flow.mag_cap,
             "flow_mag_floor": flow.mag_floor,
             "flow_encoding": "hsv_hue_v1",
+            "motion_split_version": "affine@1",
         }
     return BuiltView(tiles=output, extra_metrics=metrics, constants=constants)
 
@@ -96,12 +103,25 @@ def build_flow_strip(
                 "flow_dir_deg": round(
                     sum(item.flow_dir_deg for item in group) / len(group), 3
                 ),
+                "camera_mag": round(
+                    sum(item.camera_mag for item in group) / len(group), 6
+                ),
+                "subject_mag": round(
+                    sum(item.subject_mag for item in group) / len(group), 6
+                ),
+                "camera_motion": max(
+                    (item.camera_motion for item in group),
+                    key=lambda value: sum(
+                        1 for item in group if item.camera_motion == value
+                    ),
+                ),
             }
         )
     constants = {
         "flow_mag_cap": flows[-1].mag_cap,
         "flow_mag_floor": flows[-1].mag_floor,
         "flow_encoding": "hsv_hue_v1",
+        "motion_split_version": "affine@1",
     }
     return BuiltView(tiles=output, extra_metrics=metrics, constants=constants)
 

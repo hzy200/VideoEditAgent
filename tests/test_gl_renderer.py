@@ -85,6 +85,30 @@ def test_qtgl_matches_cpu_semantic_hash(app) -> None:
     assert comparison["channel_mean_diff"] <= 3
 
 
+def test_qtgl_render_many_matches_cpu(app) -> None:
+    from smartcut.desktop.view.render_qtgl import QtEvidenceRenderer
+
+    measure = _measure()
+    requests = [
+        _request(),
+        _request().model_copy(update={"kind": "bbox_overlay", "grid_cols": 1}),
+    ]
+    try:
+        gl_items = QtEvidenceRenderer().render_many(measure, requests)
+    except Exception as exc:  # 无 GL/RDP/驱动不可用
+        pytest.skip(f"无可用 OpenGL 上下文: {type(exc).__name__}: {exc}")
+    cpu_items = CpuEvidenceRenderer().render_many(measure, requests)
+    assert len(gl_items) == len(cpu_items) == 2
+    for gl, cpu in zip(gl_items, cpu_items):
+        comparison = compare_semantic(
+            cpu.png_bytes,
+            gl.png_bytes,
+            grid_rows=1,
+            grid_cols=1,
+        )
+        assert comparison["within_tolerance"], comparison
+
+
 def test_qtgl_not_slower_than_cpu(app) -> None:
     from smartcut.desktop.view.render_qtgl import QtEvidenceRenderer
 

@@ -197,17 +197,18 @@ python scripts/benchmark_long_video.py --src D:\video.mp4 --process-pool on --tr
 
 - `extract_ms / measure_ms / render_ms / duration_ms`
 - `tiles / windows / estimated_tiles / estimated_tokens / dropped_windows`
-- `image_bytes / backend / renderer_fallback / cache_hits`
+- `image_bytes / backend / renderer_fallback / measure_backend / cache_hits`
 - `kind`（contact_sheet / temporal_diff / flow_strip / bbox_overlay /
   roi_crop / codec_residual）
 
-`render_hash` 用于同机复现，排除 backend/driver/耗时；CPU/GL 跨后端只比较
-`semantic_hash`（≤6/64，通道均值差 ≤3/255）。
+`render_hash` 用于同机复现，排除 backend/driver/耗时与 `measure_backend`；
+CPU/GL 跨后端只比较 `semantic_hash`（≤6/64，通道均值差 ≤3/255）。
 
 ### 缓存与预算
 
-- 缓存键：`source_hash + kind + tile_index + backend + policy_version +
-  frames_key + transcript_sig + selection + 渲染常量`；
+- 缓存键：`source_hash + kind + tile_index + roi_target + label_start + dedupe +
+  backend + fps + policy_version + frames_key + transcript_sig + selection +
+  指纹版本/engine + 渲染常量`；
 - 目录：`cache/evidence/<key>/view.png + evidence.json`，临时目录原子替换；
 - top-K：镜头/质量/章节/转写/人脸种子 → 合并窗口 → 价格与 token 硬预算；
 - 设备分档：CPU 最多 5 图、tile ≤320×180；GL 使用配置上限；
@@ -224,6 +225,20 @@ python scripts/benchmark_evidence_render.py --tiles 9 --repeat 3 \
 - 绘制采用 source-rect 由 GPU 缩放，避免 CPU `QImage.scaled`；
 - 上下文/驱动失败自动回退 Pillow，记录 `backend=cpu`；
 - 本机 Windows 参考：temporal_diff CPU ≈96ms / GL ≈70ms（随素材与驱动变化）。
+
+### 批量渲染与 GpuMeasurer（P2）
+
+- `render_many(measure, requests)`：同一 measure 一次 context、共享解码图片缓存，
+  循环输出多个网格/kind；`synthesize_many` 逐请求生成独立 evidence/hash。
+  GL 仍只做拼版/编号/bbox，不在 shader 计算光流/帧差/直方图。
+- `perception/view/measure_gpu.py` 的 GpuMeasurer 与 renderer 解耦：
+  - CPU 参考路径 `measure_tiles`；
+  - CPU/GPU 用 `compare_measure_results` 做数值容差比对；
+  - GPU 失败回退 CPU，记录 `measure_backend`（不参与 render_hash）；
+  - `SMARTCUT_GPU_MEASURE_ENABLED` 且后端非 CPU 时，候选窗口采样可提升到
+    `SMARTCUT_GPU_MEASURE_FPS`（≤30fps），CPU 保持 `view_fps`。
+- 当前 OpenCV Python CUDA 绑定有限，`CudaViewMeasurer` 先做能力探测并使用
+  CPU 数值参考；未来替换 kernel 不改变 `MeasureResult` 契约。
 
 ## 12. 任务队列、项目生命周期与原子写
 

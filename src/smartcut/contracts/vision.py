@@ -5,6 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from smartcut.contracts.ids import SafeId
+from smartcut.contracts.screen_text import ScreenTextEvidence
 from smartcut.contracts.visual_evidence import LABEL_RE
 
 
@@ -27,6 +28,8 @@ class ChapterVisualNote(BaseModel):
     visual_tags: list[str] = Field(default_factory=list)
     cautions: list[str] = Field(default_factory=list)
     evidence_refs: list[str] = Field(default_factory=list)
+    # OCR 屏幕文字（按章节时间对齐，最多 5 条）；只作规划事实。
+    screen_text: list[str] = Field(default_factory=list)
 
     @field_validator("evidence_refs")
     @classmethod
@@ -57,6 +60,20 @@ class ImageVisualNotes(BaseModel):
     images: list[ImageVisualNote] = Field(default_factory=list)
 
 
+class ChapterVisualFact(BaseModel):
+    """Planner 用的章节级数值事实；不含坐标、路径或时间线操作。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    chapter_id: SafeId
+    view_kinds: list[str] = Field(default_factory=list)
+    face_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    mean_d_hist: float = Field(default=0.0, ge=0.0, le=1.0)
+    motion_level: str = "unknown"
+    camera_motion: str = "unknown"
+    quality_risks: list[str] = Field(default_factory=list)
+
+
 class VisualNotes(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -65,3 +82,6 @@ class VisualNotes(BaseModel):
     model: str | None = None
     image_count: int = Field(default=0, ge=0)
     evidence_ids: list[str] = Field(default_factory=list)
+    view_kinds: list[str] = Field(default_factory=list)
+    visual_facts: list[ChapterVisualFact] = Field(default_factory=list)
+    screen_text: list[ScreenTextEvidence] = Field(default_factory=list)

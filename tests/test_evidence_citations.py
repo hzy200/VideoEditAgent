@@ -74,7 +74,18 @@ def test_image_note_messages_interleave_evidence_and_transcript() -> None:
         evidence_id="ve_1",
         tile_metadata=(
             {"label": "T01", "t_seconds": 1.0, "pts": 30, "frame_no": 30},
-            {"label": "T02", "t_seconds": 2.0, "pts": 60, "frame_no": 60},
+            {
+                "label": "T02",
+                "t_seconds": 2.0,
+                "pts": 60,
+                "frame_no": 60,
+                "d_hist": 0.42,
+                "flow_mag": 2.1,
+                "flow_dir_deg": 123.4,
+                "face": 0.3,
+                "score": 0.75,
+                "risk": "blurry",
+            },
         ),
     )
     messages = build_image_note_messages(
@@ -86,6 +97,14 @@ def test_image_note_messages_interleave_evidence_and_transcript() -> None:
     text = messages[1]["content"][0]["text"]
     assert "证据时间线" in text
     assert "[T01|1.000s]" in text
+    assert (
+        "[T02|2.000s|d_hist 0.42|flow 2.1|dir 123|face 0.30|score 0.75|risk blurry]"
+        in text
+    )
+    # 测量表只在时间线出现一次，避免与 tiles JSON 重复。
+    assert text.count("d_hist 0.42") == 1
+    # 未测量的 T01 不得补造测量值。
+    assert "[T01|1.000s|" not in text
     assert "[语音] 大家好" in text
     assert "evidence_id" in text
 

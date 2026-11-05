@@ -20,6 +20,7 @@ from smartcut.contracts.visual_evidence import (
     tile_map_id,
 )
 from smartcut.errors import PerceptionUnavailable
+from smartcut.perception.view import fingerprint
 
 
 @dataclass(frozen=True)
@@ -29,42 +30,6 @@ class TileInput:
     frame_no: int | None
     image_bytes: bytes
     frame_ref: str | None = None
-
-
-def _dhash(image) -> int:
-    from PIL import Image
-
-    gray = image.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
-    pixels = gray.tobytes()
-    value = 0
-    for row in range(8):
-        offset = row * 9
-        for column in range(8):
-            value = (value << 1) | int(
-                pixels[offset + column] > pixels[offset + column + 1]
-            )
-    return value
-
-
-def _histogram(image) -> list[float]:
-    gray = image.convert("L")
-    buckets = gray.histogram()
-    total = max(1, sum(buckets))
-    step = len(buckets) / 16
-    result = []
-    for index in range(16):
-        start = int(index * step)
-        end = max(start + 1, int((index + 1) * step))
-        result.append(sum(buckets[start:end]) / total)
-    return result
-
-
-def _hist_distance(left: list[float], right: list[float]) -> float:
-    return min(1.0, sum(abs(a - b) for a, b in zip(left, right)) / 2.0)
-
-
-def _hamming(left: int, right: int) -> int:
-    return (left ^ right).bit_count()
 
 
 def _bbox_for(
@@ -132,8 +97,8 @@ def measure_tiles(
             with Image.open(BytesIO(item.image_bytes)) as image:
                 canvas = image.convert("RGB")
                 width, height = canvas.size
-                digest = _dhash(canvas)
-                histogram = _histogram(canvas)
+                digest = fingerprint.dhash(canvas)
+                histogram = fingerprint.histogram(canvas)
                 bbox = _bbox_for(
                     face_anchors,
                     item.t.as_fraction(),
@@ -144,12 +109,13 @@ def measure_tiles(
         except Exception:
             continue
         d_hist = (
-            _hist_distance(previous_hist, histogram)
+            fingerprint.hist_distance(previous_hist, histogram)
             if previous_hist is not None
             else 1.0
         )
         duplicate = dedupe_distance >= 0 and any(
-            _hamming(digest, other_digest) <= dedupe_distance and d_hist < 0.03
+            fingerprint.hamming(digest, other_digest) <= dedupe_distance
+            and d_hist < 0.03
             for _, _, _, other_digest in kept
         )
         previous_hist = histogram
@@ -167,6 +133,9 @@ def measure_tiles(
         )
         flow_mag = extra.get("flow_mag")
         flow_dir = extra.get("flow_dir_deg")
+        camera_mag = extra.get("camera_mag")
+        subject_mag = extra.get("subject_mag")
+        camera_motion = extra.get("camera_motion")
         bounded_flow = min(1.0, float(flow_mag or 0.0) / 5.0)
         score = min(
             1.0,
@@ -188,6 +157,19 @@ def measure_tiles(
             height=height,
             score=round(score, 6),
             engine=engine,
+            camera_mag=(
+                round(float(camera_mag), 6)
+                if camera_mag is not None
+                else None
+            ),
+            subject_mag=(
+                round(float(subject_mag), 6)
+                if subject_mag is not None
+                else None
+            ),
+            camera_motion=(
+                str(camera_motion) if camera_motion is not None else None
+            ),
         )
         kept.append((item, measurement, item.image_bytes, digest))
 
@@ -239,6 +221,7 @@ def measure_tiles(
             "tile_w": 0,
             "tile_h": 0,
             "scene_threshold_pct": 0.0,
+            **fingerprint.constants(),
         },
     )
 

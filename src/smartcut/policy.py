@@ -12,10 +12,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from smartcut.contracts.ids import SafeId
 from smartcut.contracts.templates import Phase
+from smartcut.contracts.visual_evidence import ViewKind
 
 # phase 名称的唯一代码事实源：由契约 Literal 派生。
 PHASE_NAMES: frozenset[str] = frozenset(get_args(Phase))
@@ -58,6 +59,47 @@ class EncodingPolicy(BaseModel):
     error_keywords: list[str]
 
 
+class ViewRouteSpec(BaseModel):
+    """一种内容类型对应的证据视图组合。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: SafeId
+    primary: ViewKind
+    extras: list[ViewKind] = Field(default_factory=list, max_length=2)
+    keywords: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _extras_do_not_repeat(self) -> "ViewRouteSpec":
+        if len(set(self.extras)) != len(self.extras):
+            raise ValueError(f"routing[{self.id}].extras 不能重复")
+        if self.primary in self.extras:
+            raise ValueError(f"routing[{self.id}].extras 不能包含 primary")
+        return self
+
+
+class ViewRoutingPolicy(BaseModel):
+    """内容类型 → 证据视图路由；只决定送哪些视图，不决定切点。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1, max_length=64)
+    default: SafeId
+    types: list[ViewRouteSpec] = Field(min_length=1)
+    face_coverage_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    shot_rate_threshold: float = Field(default=0.5, ge=0.0)
+    transcript_chars_per_second_threshold: float = Field(default=2.0, ge=0.0)
+
+    @model_validator(mode="after")
+    def _default_and_ids(self) -> "ViewRoutingPolicy":
+        ids = [item.id for item in self.types]
+        if len(ids) != len(set(ids)):
+            raise ValueError("routing.types.id 不能重复")
+        if self.default not in ids:
+            raise ValueError(f"routing.default 不在 types 中: {self.default!r}")
+        return self
+
+
 class VisionPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -73,6 +115,8 @@ class VisionPolicy(BaseModel):
     chapter_tiles: bool = True
     second_pass_cautions: int = Field(default=2, ge=0)
     mime_types: list[str]
+    # 缺省为 None：外部/旧策略目录仍可加载；随包策略由 check_drift 强制提供。
+    routing: ViewRoutingPolicy | None = None
 
 
 TaskCondition = Literal["always", "video", "audio", "plan", "render"]

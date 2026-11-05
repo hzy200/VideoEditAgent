@@ -6,6 +6,7 @@ import hashlib
 from io import BytesIO
 
 from smartcut.contracts.visual_evidence import canonical_bytes
+from smartcut.perception.view import fingerprint
 
 
 def sha256_bytes(payload: bytes) -> str:
@@ -13,20 +14,7 @@ def sha256_bytes(payload: bytes) -> str:
 
 
 def _dhash_64(image) -> int:
-    try:
-        from PIL import Image
-    except ImportError as exc:  # pragma: no cover - vision optional
-        raise RuntimeError("需要 Pillow 计算 semantic_hash") from exc
-    gray = image.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
-    pixels = gray.tobytes()
-    value = 0
-    for row in range(8):
-        offset = row * 9
-        for column in range(8):
-            value = (value << 1) | int(
-                pixels[offset + column] > pixels[offset + column + 1]
-            )
-    return value
+    return fingerprint.dhash(image)
 
 
 def semantic_hash(
@@ -54,7 +42,8 @@ def semantic_hash(
                 right = round(width * (col + 1) / grid_cols)
                 cell = canvas.crop((left, top, max(left + 1, right), max(top + 1, bottom)))
                 values.append(_dhash_64(cell))
-    return "dhash:" + "".join(f"{value:016x}" for value in values)
+    version = fingerprint.FINGERPRINT_VERSION.replace("dhash:", "")
+    return f"dhash:{version}:" + "".join(f"{value:016x}" for value in values)
 
 
 def compare_semantic(
@@ -91,7 +80,7 @@ def compare_semantic(
 
 
 def _decode(value: str) -> list[int]:
-    text = value.removeprefix("dhash:")
+    text = value.rsplit(":", 1)[-1]
     return [int(text[index : index + 16], 16) for index in range(0, len(text), 16)]
 
 

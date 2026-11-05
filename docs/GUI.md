@@ -70,6 +70,10 @@
 - **证据**：可选 contact sheet / 帧差光流 / 光流条带 / bbox / ROI / codec 残差；
   面板显示证据缩略图与 `Txx` 时间码，点击行定位播放头；时间线只读叠加证据点、
   静音区与候选窗口。
+- **语义证据**：屏幕文字 OCR、主体跟踪与相机/主体运动拆分目前注入章节 note /
+  Planner，尚未在证据面板单独展示；OCR 开关/参数用 `SMARTCUT_OCR_*` 配置。
+  批量渲染与 GpuMeasurer 对 GUI 透明，`measure_backend` 出现在运行 metrics/
+  诊断信息中。
 - **候选片段**：FTS 搜索、候选列表、多选后一键加入时间线。
 - **运行指标**：wall/agent 耗时、队列等待、重试、cache H/M、命中率、
   LLM tokens、编码器；按 agent 展示。

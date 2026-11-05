@@ -83,3 +83,10 @@ Phase B (phase=plan, approved_outline_id=...)
 - proxy 优先加载；代理失败不影响分析与渲染。
 - VLM 未配置时行为与 Phase 2 完全一致；配置后失败可降级。
 - 旧数据库可无损迁移；全量测试与打包自检通过。
+
+## 后续语义/证据增强（已实现）
+
+P0–P2 的视图路由/多视图、测量事实与 `visual_facts`、屏幕文字 OCR、主体跟踪、
+相机/主体运动拆分、镜头聚类、统一指纹、批量渲染与 GpuMeasurer，见
+`README.md`、`docs/VISION.md`、`docs/INVARIANTS.md`（91–103）与
+`docs/PERFORMANCE.md`。

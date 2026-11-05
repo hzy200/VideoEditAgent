@@ -155,6 +155,7 @@ from smartcut.server.services.evidence import EvidenceMixin
 from smartcut.server.services.orchestration import OrchestrationMixin
 from smartcut.server.services.perception import PerceptionMixin
 from smartcut.server.services.rendering import RenderMixin
+from smartcut.server.services.screen_text import ScreenTextMixin
 from smartcut.server.services.visual import VisualMixin
 
 
@@ -162,6 +163,7 @@ class Services(
     EvidenceMixin,
     VisualMixin,
     RenderMixin,
+    ScreenTextMixin,
     PerceptionMixin,
     OrchestrationMixin,
     ServiceBase,

@@ -58,10 +58,18 @@ class Settings(BaseSettings):
     perception_process_pool_min_frames: int = 240
     # 进程池整批 watchdog；超时 terminate 整个池，避免单帧卡死拖住任务。
     perception_process_pool_timeout_seconds: float = 600.0
+    # 人脸跟踪：centroid+IoU 关联并对同一主体锚点做 EMA 平滑，改善 9:16 裁切。
+    face_tracking_enabled: bool = True
+    face_track_iou_threshold: float = Field(default=0.3, ge=0.0, le=1.0)
+    face_track_max_gap_seconds: float = Field(default=2.0, ge=0.0)
+    face_smoothing_alpha: float = Field(default=0.4, ge=0.0, le=1.0)
     frame_thumb_width: int = 320
     frame_thumb_height: int = 180
     waveform_buckets: int = 2000
     chapter_target_seconds: float = 300.0
+    # 镜头视觉聚类：相似镜头（同一页 PPT/录屏）不因内部切点拆成多章。
+    chapter_clustering_enabled: bool = True
+    chapter_cluster_similarity: float = Field(default=0.92, ge=0.0, le=1.0)
 
     # 渲染管线输入规范化：HDR tonemap 默认关闭，仅提示风险。
     render_hdr_tonemap: bool = False
@@ -145,6 +153,11 @@ class Settings(BaseSettings):
     view_policy_version: str = "views@1.0"
     view_dedupe_hash_distance: int = Field(default=4, ge=0, le=32)
     view_total_max_bytes: int = Field(default=12 * 1024 * 1024, ge=0)
+    # 独立测量器（与 renderer 解耦）；GPU 用于更高密度采样，默认 CPU。
+    gpu_measure_enabled: bool = False
+    gpu_measure_backend: str = "auto"  # auto / cuda / cpu
+    gpu_measure_fps: float = Field(default=12.0, gt=0.0, le=30.0)
+    gpu_measure_tolerance: float = Field(default=0.02, ge=0.0, le=1.0)
 
     # 多模态视觉摘要（OpenAI 兼容 VLM；未配置则禁用）
     # remote=OpenAI 兼容；local=本地插件模块（可选 ONNX 后端）
@@ -176,6 +189,16 @@ class Settings(BaseSettings):
     vision_chapter_tiles: bool = True
     # 摘要为空或 cautions 达到阈值时补一次复核请求。
     vision_second_pass_cautions: int = 2
+
+    # 屏幕文字 OCR（可选外部 worker；桌面主进程不 import OCR 重依赖）
+    ocr_enabled: bool = False
+    ocr_engine: str = "auto"  # auto / rapidocr / tesseract
+    ocr_worker_timeout_seconds: float = Field(default=180.0, gt=0.0)
+    ocr_max_frames: int = Field(default=120, ge=1)
+    ocr_min_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    ocr_min_stability: float = Field(default=0.0, ge=0.0, le=1.0)
+    ocr_region_max_per_frame: int = Field(default=6, ge=1, le=32)
+    ocr_policy_version: str = "ocr@1.0"
 
     # DeepSeek（OpenAI 兼容）
     deepseek_api_key: str | None = Field(

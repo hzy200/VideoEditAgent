@@ -22,7 +22,9 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   模式并设 F1 下限。
 - **每任务独立工作区**：文件复制到 `workspace/projects/{id}/`，源文件只读。
 - **本地媒体能力**：ffprobe、cut/concat、代理预览、转写（faster-whisper）。
-- **OpenCV 感知**：PySceneDetect 镜头切分、黑/静/糊/重复帧、人脸锚点、contact sheet。
+- **OpenCV 感知**：PySceneDetect 镜头切分、黑/静/糊/重复帧、人脸锚点 +
+  centroid/IoU 跟踪、HSV 镜头聚类、contact sheet；证据视图按内容路由，
+  可选独立 worker OCR 识别屏幕文字。
 - **候选片段 + FTS5**：转写句群融合镜头/质量/人脸，按目标做中英文检索。
 - **Critic 局部重规划**：移除黑帧/模糊/重复帧区间，按镜头拆分过长片段，自动提交新 revision。
 - **包装**：9:16 重构图（人脸锚点+中心回退）、SRT/VTT、可选烧录、-14 LUFS 响度归一。
@@ -63,8 +65,8 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   fit+字幕+响度单次编码；公平资源池（优先级/timeout/deadline）、
   可选 OpenCV 进程池、GPU 解码与转写策略。
 - **可观测性**：每次 run 记录按 agent 的队列等待/耗时/重试、缓存命中率、
-  LLM token、编码器、VLM 图片/字节/token、解码器、分析 engine、
-  抽帧/分析/丢弃帧数与阶段耗时；FTS top 内存排序 + 缓存；
+  LLM token、编码器、VLM 图片/字节/token、OCR 条目数、解码器、分析 engine、
+  `measure_backend`、抽帧/分析/丢弃帧数与阶段耗时；FTS top 内存排序 + 缓存；
   工具审计每 20 条批量写。
 - **性能基准**：`scripts/benchmark_long_video.py` 按阶段输出耗时、缓存命中、
   分析 engine、转写 worker/设备；`scripts/benchmark_evidence_render.py`
@@ -108,6 +110,32 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   ROI 回原素材高分辨率裁切、ffmpeg `codecview` 残差可视化；按 CPU/GL 分档
   限制图片与 tile 尺寸；“视觉证据”面板展示缩略图、Txx 时间码并可点击定位；
   时间线只读叠层显示证据点、静音区与候选窗口。
+- **证据路由与多视图（P0）**：`policies/vision.json` 按目标关键词与感知信号
+  选择主视图 + 最多 2 个补充视图（口播→bbox+ROI、运动→帧差+光流等）；
+  多视图共享一次候选窗口与原始帧抽帧，Txx 标签全局不相交；ROI 按
+  `measurements.score` 选最异常时刻；二次复核对 flagged 章节换 kind/ROI。
+- **测量事实注入 Planner（P0.3/P0.4）**：`d_hist/flow/dir/face/score/risk/
+  cam/subj/motion` 进入 VLM 证据时间线；章节级 `visual_facts`
+  （face_coverage/mean_d_hist/motion_level/camera_motion/quality_risks）
+  注入 Planner，默认限制前 40 章。
+- **屏幕文字 OCR（P1）**：cv2 形态学梯度/轮廓筛选候选区，OCR 走独立 worker
+  （可选 `.[ocr]`，主进程不 import 重依赖）；缓存键含
+  `source_hash + frame_sha256 + worker_version + policy_version`；
+  结果按时间对齐章节 note / Planner，不写 IR。
+- **主体跟踪与平滑（P1）**：centroid+IoU 关联输出 `track_id` 与出现区间，
+  同一 track 锚点 EMA 平滑，改善 9:16 裁切稳定性。
+- **相机/主体运动拆分（P1）**：RANSAC 仿射拆出 `camera_mag/subject_mag`，
+  分类 static/pan/tilt/zoom，供 Planner 识别 B-roll、推拉摇移与抖动。
+- **镜头聚类（P1）**：HSV 直方图相关性聚类，章节只在视觉簇边界处切分，
+  避免同一页 PPT/录屏被内部切点拆成多章。
+- **统一基础指纹（P1）**：dHash/直方图收口到 `perception/view/fingerprint.py`，
+  `dhash:v2` 与 engine 进入证据/质量/候选缓存键与 evidence meta。
+- **批量证据渲染（P2）**：`render_many/synthesize_many` 一次渲染调用输出多个
+  网格/kind，复用同一 context 与解码图片缓存，每个产物独立内容寻址。
+- **独立 GpuMeasurer（P2）**：与 renderer 解耦，只输出数值 `MeasureResult`；
+  CPU 等价路径 + 数值容差比对 + 失败回退，`measure_backend` 不参与
+  `render_hash`；GPU 可用时候选窗口采样可提升到 10–30fps（当前 OpenCV
+  CUDA 绑定有限，默认 CPU；kernel 可替换而不改变契约）。
 - **反馈闭环**：保存 revision 时把被删除片段写入 `segment_reject`，偏好统计
   排除被拒标签；「我的偏好」面板显示样本数/中位片段/保留率/top tags 与
   「按我的节奏规划」开关。
@@ -150,12 +178,19 @@ conda activate video_edit
 # 桌面 + 本地转写 + 测试依赖
 python -m pip install -e ".[desktop,transcribe,dev]"
 
+# 可选屏幕文字 OCR（独立 worker；主程序不 import OCR 引擎）
+python -m pip install -e ".[ocr]"
+
 # 启动 GUI
 python -m smartcut.desktop.app
 ```
 
 不配置 API Key 时，Orchestrator 自动降级为分析与转写；可在“设置”中填写
 DeepSeek Key（保存到 Windows Credential Manager），或开发态继续使用 `.env`。
+
+屏幕文字 OCR 默认关闭；安装 `.[ocr]`（RapidOCR）或系统 tesseract 后设置
+`SMARTCUT_OCR_ENABLED=true`。OCR 在独立 worker 进程加载，引擎缺失/超时/
+取消时自动降级，不阻断视觉摘要与规划。
 
 可选人声分离（伴生 worker，不进入主程序依赖）：
 
@@ -288,9 +323,12 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
    “视觉证据”可选择帧差/光流/bbox/ROI/codec 残差并点击定位；最新 revision 自动加载。
 8. 在“版本与片段”中改起止秒数 → 保存为新版本 → dry-run → 渲染；
    可通过 revision diff 查看新增/删除/未变片段。
-9. 配置 VLM 后，规划默认使用证据视图与 `Txx` 证据时间线；VLM/Planner 只能
-   引用真实标签。未配置或调用失败时完全回退文本规划；
+9. 配置 VLM 后，规划默认使用证据视图与 `Txx` 证据时间线；按
+   `policies/vision.json` 路由主视图 + 补充视图，多视图标签全局唯一，
+   ROI/二次复核按 measurements 选最异常时刻；VLM/Planner 只能引用真实标签。
+   未配置或调用失败时完全回退文本规划；
    `SMARTCUT_VISION_USE_EVIDENCE=false` 可回退旧 contact sheet/keyframes。
+   开启 OCR 后，屏幕文字按时间注入章节 note/Planner。
 10. 需要竖版/字幕/响度时，勾选 AI 面板选项；渲染产出 9:16 视频与 SRT/VTT。
 11. 运行中可取消；失败/取消后可“缓存辅助续跑”，已完成的分块/感知/LLM 结果会复用。
 12. 模板与批量编排可通过可选服务端 API 使用（见下文）。
@@ -310,6 +348,7 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
         ├── cache\               # 内容寻址缓存：frames/scenes/quality/faces/
         │                        # chapters/candidates/manifest/vision_notes/
         │                        # evidence（view.png + evidence.json）/
+        │                        # ocr_frame/screen_text/
         │                        # transcripts/audio_chunks/segments/proxy/llm/
         │                        # review_frames/review_sheet
         ├── renders\r{n}\        # 成片 + captions.srt/vtt
@@ -332,11 +371,28 @@ OpenCV 锁定 4.x（5.x 移除了内置 Haar cascade），会明显增加包体�
 - 视觉证据：`SMARTCUT_VIEW_EVIDENCE_ENABLED`、`SMARTCUT_VIEW_MAX_IMAGES`、
   `SMARTCUT_VIEW_MAX_WINDOWS`、`SMARTCUT_VIEW_FPS`、`SMARTCUT_VIEW_TILE_*`、
   `SMARTCUT_VIEW_RENDERER=auto|cpu`、`SMARTCUT_VISION_USE_EVIDENCE`；
-  缓存键含 source_hash + policy_version + 渲染常量，`evidence.json` 记录
-  `render_hash`/`semantic_hash`/backend。
+  路由策略见 `policies/vision.json` 的 `routing`，缓存键含 source_hash +
+  policy_version + 路由版本 + label_start/dedupe/fps + fingerprint 版本/engine
+  + 渲染常量；`evidence.json` 记录 `render_hash`/`semantic_hash`/backend。
+- 多视图：主视图 + 最多 2 个补充视图共享一次抽帧；Txx 全局唯一；
+  ROI 按 measurements.score 选最异常时刻；二次复核换 kind/ROI。
+- 屏幕文字 OCR：`SMARTCUT_OCR_ENABLED`、`SMARTCUT_OCR_ENGINE=auto|rapidocr|
+  tesseract`、`SMARTCUT_OCR_MAX_FRAMES`、`SMARTCUT_OCR_MIN_CONFIDENCE`、
+  `SMARTCUT_OCR_MIN_STABILITY`、`SMARTCUT_OCR_REGION_MAX_PER_FRAME`、
+  `SMARTCUT_OCR_WORKER_TIMEOUT_SECONDS`、`SMARTCUT_OCR_POLICY_VERSION`；
+  逐帧缓存键 = source_hash + frame_sha256 + worker_version + policy_version。
+- 人脸跟踪/聚类：`SMARTCUT_FACE_TRACKING_ENABLED`、
+  `SMARTCUT_FACE_TRACK_IOU_THRESHOLD`、`SMARTCUT_FACE_TRACK_MAX_GAP_SECONDS`、
+  `SMARTCUT_FACE_SMOOTHING_ALPHA`、`SMARTCUT_CHAPTER_CLUSTERING_ENABLED`、
+  `SMARTCUT_CHAPTER_CLUSTER_SIMILARITY`；参数进入对应缓存键。
+- GPU 测量（可选）：`SMARTCUT_GPU_MEASURE_ENABLED`、
+  `SMARTCUT_GPU_MEASURE_BACKEND=cpu|auto|cuda`、`SMARTCUT_GPU_MEASURE_FPS`
+  （≤30）、`SMARTCUT_GPU_MEASURE_TOLERANCE`；失败回退 CPU 并记录
+  `measure_backend`。
 - 缓存与日志：`SMARTCUT_CACHE_MAX_MB` 只淘汰可重算 kind（frames/scenes/
-  quality/faces/contactsheet/llm/vision/transcript/audio_chunks/evidence），
-  segments/renders/manifest/result 永不淘汰；日志 10MB×3 轮转；
+  quality/faces/contactsheet/llm/vision/transcript/audio_chunks/evidence/
+  ocr_frame/screen_text），segments/renders/manifest/result 永不淘汰；
+  日志 10MB×3 轮转；
   `SMARTCUT_TOOL_AUDIT_RETENTION_DAYS` 清理过期工具审计。
 - `src/smartcut/policies/*.json` 是 agent/tool/encoder/vision/workflow 的机器可读约束；
   `python scripts/check_drift.py` 会检查代码与策略是否一致。
@@ -386,7 +442,7 @@ conda activate video_edit
 python -m pytest -q
 ```
 
-当前结果：**527 collected，519 passed + 8 skipped（live/CI 专项/本地模型/无 GL）**。
+当前结果：**560 collected，551 passed + 9 skipped（live/CI 专项/本地模型/无 GL）**。
 默认测试不访问网络：契约、golden、ffmpeg 工具链、代理生成、
 OpenCV 镜头/质量/人脸/contact sheet、9:16、字幕映射与烧录、响度实测、
 内容寻址缓存、分块转写、章节化、候选片段与 FTS5 检索、Critic 局部重规划、
@@ -419,6 +475,20 @@ P0–M2 新增回归覆盖：
   VLM/Planner `evidence_refs` 校验、QtGL/CPU 语义与性能、M2 多视图、
   EvidencePanel 与时间线只读叠层。
 
+P0–P2 语义/证据新增回归覆盖：
+
+- 路由/多视图：`vision.json` 路由、多视图标签不相交、一次抽帧、ROI 按
+  measurements.score 选最异常时刻、二次复核换 kind/ROI；
+- 测量/Planner：`d_hist/flow/dir/face/score/cam/subj/motion/risk`、
+  `visual_facts` 限流与 `chapter_ids` 过滤、缺失值不补造；
+- OCR：候选区检测、时间稳定性聚合、逐帧内容缓存、章节 note/Planner 注入、
+  worker 失败降级；
+- 跟踪/运动拆分/聚类：`track_id`/出现区间、EMA 平滑、camera/subject 拆分、
+  HSV 镜头聚类；
+- 统一指纹：`dhash:v2`/engine、Pillow fallback、CPU/GL 语义比对；
+- 渲染/测量：`render_many/synthesize_many`、GpuMeasurer CPU 等价/容差/回退、
+  `measure_backend` 不参与 `render_hash`。
+
 CI（`.github/workflows/ci.yml`）在 windows-latest 安装
 `.[dev,desktop,transcribe,vision,server]`（`vision` 是测试收集期必需）并执行：
 
@@ -440,9 +510,12 @@ SMARTCUT_LIVE_DEEPSEEK=1 python -m pytest -q -m live
 ```
 src/smartcut/
   contracts/      # RationalTime / MediaFacts / EditIR / Manifest / Template /
-                  # ToolCall / visual_evidence / export_presets
-  perception/     # ffprobe、转写、感知、候选、manifest、进程池
-    view/         # VisualEvidence 选择/测量/hash/CPU 渲染/多视图/预算
+                  # ToolCall / visual_evidence / screen_text / export_presets
+  perception/     # ffprobe、转写、感知、候选、manifest、进程池、镜头聚类、
+                  # 屏幕文字候选区
+    view/         # VisualEvidence 选择/测量/hash/CPU 渲染/多视图/预算/
+                  # fingerprint/路由/GpuMeasurer/批量渲染
+  ocr_worker.py   # OCR 独立 worker 入口；重依赖只在该进程加载
   llm/            # DeepSeek/Vision 客户端、single-flight、本地视觉适配器
   planner/        # DeepSeek/Hybrid/Rule Planner、视觉上下文、EDL 评估
   compiler/       # 纯函数 lowering、字幕/包装、编码参数、IR diff
@@ -452,7 +525,7 @@ src/smartcut/
   desktop/        # PySide6 GUI、大纲确认、审片入口、控制器、资源路径
     view/         # Qt OpenGL 离屏证据渲染器
   server/         # 可选 FastAPI、缓存、FTS5、模板、批量、大纲快照
-    services/     # 业务编排 + 证据服务/缓存/metrics
+    services/     # 业务编排 + 证据/OCR 服务/缓存/metrics
   benchmark.py    # 长视频阶段性能基准
 docs/             # 需求/可行性 + INVARIANTS/AGENT_PROTOCOL/MEDIA_PIPELINE/
                   # VISION/PHASE3/PERFORMANCE/GUI/OPTIMIZATION_PLAN
@@ -460,7 +533,8 @@ scripts/          # prepare_vendor / smoke_desktop / check_drift /
                   # benchmark_long_video / evaluate_selection /
                   # benchmark_evidence_render
 packaging/        # PyInstaller spec / Windows 构建脚本
-tests/            # 核心 + 桌面 + live + eval + evidence/GL
+tests/            # 核心 + 桌面 + live + eval + evidence/GL + 路由/OCR/
+                  # 跟踪/运动拆分/聚类/指纹/GpuMeasurer
 ```
 
 ## 许可与注意

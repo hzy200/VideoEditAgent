@@ -171,6 +171,29 @@ def test_unused_agent_is_rejected_at_load(tmp_path: Path) -> None:
         load_policy(policy_dir_path)
 
 
+def test_unknown_view_kind_is_rejected_at_load(tmp_path: Path) -> None:
+    policy_dir_path = _copied_policy(tmp_path)
+
+    def bad_kind(data: dict) -> None:
+        data["routing"]["types"][0]["primary"] = "heatmap"
+
+    _edit_json(policy_dir_path / "vision.json", bad_kind)
+    with pytest.raises(ValueError):
+        load_policy(policy_dir_path)
+
+
+def test_default_route_must_be_contact_sheet(tmp_path: Path) -> None:
+    policy_dir_path = _copied_policy(tmp_path)
+
+    def unsafe_default(data: dict) -> None:
+        data["routing"]["default"] = "motion_demo"
+
+    _edit_json(policy_dir_path / "vision.json", unsafe_default)
+    policy = _read_policy(policy_dir_path, validate=False)
+    errors = _load_drift_module().check(policy)
+    assert any("default" in item and "contact_sheet" in item for item in errors)
+
+
 def test_new_contracts_are_exported_in_schemas() -> None:
     assert {
         "candidate_list",
@@ -179,6 +202,7 @@ def test_new_contracts_are_exported_in_schemas() -> None:
         "encoder_profile",
         "image_visual_notes",
         "outline_approval",
+        "screen_text_report",
         "visual_notes",
     } <= set(MODELS)
 

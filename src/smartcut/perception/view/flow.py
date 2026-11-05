@@ -26,6 +26,62 @@ class FlowResult:
     flow_dir_deg: float
     mag_cap: float
     mag_floor: float
+    camera_mag: float = 0.0
+    subject_mag: float = 0.0
+    camera_motion: str = "unknown"
+    camera_confidence: float = 0.0
+
+
+def _split_motion(prev_gray, curr_gray, flow, cv2, np) -> dict:
+    """用 RANSAC 仿射把光流拆成全局相机项与残差主体项。"""
+    height, width = prev_gray.shape[:2]
+    step = 16
+    ys, xs = np.mgrid[step // 2 : height : step, step // 2 : width : step]
+    if xs.size < 4:
+        return {}
+    src = np.stack([xs.ravel(), ys.ravel()], axis=1).astype(np.float32)
+    dst = src + flow[ys.ravel(), xs.ravel()]
+    try:
+        matrix, inliers = cv2.estimateAffinePartial2D(
+            src,
+            dst,
+            method=cv2.RANSAC,
+            ransacReprojThreshold=2.0,
+            maxIters=64,
+            confidence=0.95,
+        )
+    except Exception:
+        return {}
+    if matrix is None:
+        return {}
+    ones = np.ones((len(src), 1), dtype=np.float32)
+    predicted = np.hstack([src, ones]) @ matrix.T
+    global_disp = predicted - src
+    residual = dst - predicted
+    camera_mag = float(np.linalg.norm(global_disp, axis=1).mean())
+    subject_mag = float(np.linalg.norm(residual, axis=1).mean())
+    scale = float(math.hypot(matrix[0, 0], matrix[1, 0]))
+    tx = float(matrix[0, 2])
+    ty = float(matrix[1, 2])
+    if camera_mag < 0.2:
+        motion = "static"
+    elif abs(scale - 1.0) > 0.02:
+        motion = "zoom"
+    elif abs(tx) > abs(ty) * 1.2:
+        motion = "pan"
+    elif abs(ty) > abs(tx) * 1.2:
+        motion = "tilt"
+    else:
+        motion = "camera"
+    confidence = (
+        float(np.asarray(inliers).mean()) if inliers is not None else 0.0
+    )
+    return {
+        "camera_mag": round(camera_mag, 6),
+        "subject_mag": round(subject_mag, 6),
+        "camera_motion": motion,
+        "camera_confidence": round(min(1.0, max(0.0, confidence)), 4),
+    }
 
 
 def _cv():
@@ -101,6 +157,7 @@ def flow_between(
     hue_rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
     flow_x = np.clip((dx / cap + 1.0) * 127.5, 0, 255).astype(np.uint8)
     flow_y = np.clip((dy / cap + 1.0) * 127.5, 0, 255).astype(np.uint8)
+    split = _split_motion(prev_gray, curr_gray, flow, cv2, np)
     return FlowResult(
         diff_rgb=_encode_rgb(diff_rgb),
         hue_rgb=_encode_rgb(hue_rgb),
@@ -110,6 +167,10 @@ def flow_between(
         flow_dir_deg=round(float(np.degrees(angle).mean()), 3),
         mag_cap=round(cap, 4),
         mag_floor=round(floor, 4),
+        camera_mag=float(split.get("camera_mag", 0.0)),
+        subject_mag=float(split.get("subject_mag", 0.0)),
+        camera_motion=str(split.get("camera_motion", "unknown")),
+        camera_confidence=float(split.get("camera_confidence", 0.0)),
     )
 
 

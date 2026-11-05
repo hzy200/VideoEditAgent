@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from io import BytesIO
 
 from smartcut.contracts.visual_evidence import (
@@ -60,6 +61,26 @@ class CpuEvidenceRenderer:
         self.device_tier = "cpu"
 
     def render(self, measure: MeasureResult, request: ViewRequest) -> RenderedImage:
+        return self._render(measure, request, {})
+
+    def render_many(
+        self,
+        measure: MeasureResult,
+        requests: list[ViewRequest],
+    ) -> list[RenderedImage]:
+        """同一 measure 的多个网格/kind 请求共享解码后的图片。"""
+        image_cache: dict[str, object] = {}
+        return [
+            self._render(measure, request, image_cache)
+            for request in requests
+        ]
+
+    def _render(
+        self,
+        measure: MeasureResult,
+        request: ViewRequest,
+        image_cache: dict[str, object],
+    ) -> RenderedImage:
         try:
             from PIL import Image, ImageDraw, ImageOps
         except ImportError as exc:  # pragma: no cover
@@ -80,14 +101,21 @@ class CpuEvidenceRenderer:
             measure.tile_images,
             measure.measurements,
         ):
+            cache_key = hashlib.sha256(image_bytes).hexdigest()
+            image = image_cache.get(cache_key)
+            if image is None:
+                try:
+                    with Image.open(BytesIO(image_bytes)) as source:
+                        image = source.convert("RGB")
+                except Exception:
+                    continue
+                image_cache[cache_key] = image
             try:
-                with Image.open(BytesIO(image_bytes)) as source:
-                    image = source.convert("RGB")
-                    fitted = ImageOps.fit(
-                        image,
-                        (tile_width, tile_height),
-                        method=Image.Resampling.LANCZOS,
-                    )
+                fitted = ImageOps.fit(
+                    image,
+                    (tile_width, tile_height),
+                    method=Image.Resampling.LANCZOS,
+                )
             except Exception:
                 continue
             index = tile.index - 1

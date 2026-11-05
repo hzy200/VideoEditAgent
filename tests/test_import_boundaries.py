@@ -10,7 +10,8 @@ SRC = ROOT / "src" / "smartcut"
 # 不参与领域分层；新增边必须先在这里登记并在 docs/INVARIANTS.md 说明理由。
 ALLOWED_EDGES: dict[str, set[str]] = {
     "contracts": {"errors"},
-    "perception": {"contracts", "config", "errors", "logging"},
+    # ocr_worker 是独立进程入口；重依赖只在 worker 内懒加载。
+    "perception": {"contracts", "config", "errors", "logging", "ocr_worker"},
     "compiler": {"contracts", "errors"},
     # planner -> llm 是 DeepSeek 客户端的直接依赖，属于已登记边。
     "planner": {"contracts", "config", "errors", "llm", "logging", "resources"},

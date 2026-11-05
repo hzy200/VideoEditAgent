@@ -76,7 +76,9 @@ from smartcut.perception import manifest as manifest_mod
 from smartcut.perception import process_pool
 from smartcut.perception import quality as quality_mod
 from smartcut.perception import scenes as scenes_mod
+from smartcut.perception.screen_text import build_screen_text_extractor
 from smartcut.perception.transcribe import Transcriber, build_transcriber
+from smartcut.perception.view.measure_gpu import build_view_measurer
 from smartcut.planner.client import DeepSeekPlanner
 from smartcut.planner.context import filter_transcript_to_chapters
 from smartcut.planner.hybrid import HybridPlanner
@@ -145,11 +147,17 @@ class ServiceBase:
         transcriber: Transcriber | None = None,
         planner: DeepSeekPlanner | None = None,
         view_renderer: Any | None = None,
+        view_measurer: Any | None = None,
+        screen_text_extractor: Any | None = None,
     ) -> None:
         self.settings = settings
         self.db = db
         self.jobs = jobs
         self.view_renderer = view_renderer
+        self.view_measurer = view_measurer or build_view_measurer(settings)
+        self.screen_text_extractor = (
+            screen_text_extractor or build_screen_text_extractor(settings)
+        )
         self.logger = logger or get_logger("smartcut.services")
         self.workspaces = WorkspaceManager(settings.workspace_root)
         self.resources = ResourceManager(settings)

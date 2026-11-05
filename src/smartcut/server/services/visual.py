@@ -35,6 +35,7 @@ from smartcut.contracts.media import MediaFacts
 from smartcut.contracts.perception import PerceptionData
 from smartcut.contracts.quality import QualityReport
 from smartcut.contracts.review import EditReview, RenderReview, ReviewIssue
+from smartcut.contracts.screen_text import ScreenTextEvidence
 from smartcut.contracts.shots import ShotList
 from smartcut.contracts.templates import EditTemplate
 from smartcut.contracts.time import RationalTime, seconds_from_mapping
@@ -76,6 +77,11 @@ from smartcut.perception import process_pool
 from smartcut.perception import quality as quality_mod
 from smartcut.perception import scenes as scenes_mod
 from smartcut.perception.transcribe import Transcriber, build_transcriber
+from smartcut.perception.view.route import (
+    ViewRoute,
+    route_views,
+    rules_from_policy,
+)
 from smartcut.planner.client import DeepSeekPlanner
 from smartcut.planner.context import filter_transcript_to_chapters
 from smartcut.planner.vision import (
@@ -144,7 +150,9 @@ class _VisionContext:
     usage_scope: str | None
     token_budget: int | None
     transcript: Any | None = None
-    evidence: dict | None = None
+    evidence_views: tuple[dict, ...] = ()
+    route: ViewRoute | None = None
+    screen_text: tuple[ScreenTextEvidence, ...] = ()
 
 
 class VisualMixin:
@@ -199,6 +207,7 @@ class VisualMixin:
             ctx, vision_items, images
         )
         chapter_notes = self._merge_chapter_notes(vision_items, images, image_notes)
+        self._attach_screen_text(chapter_notes, ctx.screen_text, vision_items)
         (
             second_pass_images,
             deep_images,
@@ -219,6 +228,7 @@ class VisualMixin:
             second_pass_images=second_pass_images,
             second_pass_chapters=second_pass_chapters,
             usage=usage,
+            visual_facts=self._visual_facts(ctx, vision_items),
         )
 
     def _select_vision_chapters(
@@ -252,33 +262,75 @@ class VisualMixin:
         chapter_ids: list[str] | None = None,
     ) -> _VisionContext:
         asset = self._require_asset(project_id)
-        evidence = None
+        perception = self.get_perception(project_id)
+        transcript = self.get_transcript(project_id)
+        evidence_views: list[dict] = []
+        route: ViewRoute | None = None
         if self.settings.vision_use_evidence and self.settings.view_evidence_enabled:
             try:
-                evidence = self.build_visual_evidence(
+                facts = MediaFacts.model_validate_json(asset.facts_json)
+                policy = getattr(self, "policy", None)
+                routing_policy = getattr(
+                    getattr(policy, "vision", None), "routing", None
+                )
+                route = route_views(
+                    goal,
+                    perception,
+                    transcript,
+                    facts.duration.to_float(),
+                    rules_from_policy(routing_policy),
+                )
+                results = self.build_visual_evidence_set(
                     project_id,
+                    list(route.kinds)[: self.settings.vision_max_images],
                     chapter_ids=chapter_ids,
                     cancel_token=cancel_token,
+                    label_start=1,
+                    roi_target_resolver=self._most_anomalous_moment,
                 )
+                # 标签区间由批量入口顺序分配，非 codec 视图共享一次抽帧。
+                evidence_views = [
+                    result
+                    for result in results
+                    if (result or {}).get("available")
+                ]
             except Exception as exc:
                 self.logger.warning(
                     "visual_evidence_unavailable",
                     project_id=project_id,
                     error=f"{type(exc).__name__}: {exc}",
                 )
-                evidence = None
+                evidence_views = []
+        screen_text: tuple[ScreenTextEvidence, ...] = ()
+        if self.settings.ocr_enabled:
+            try:
+                result = self.build_screen_text(
+                    project_id, cancel_token=cancel_token
+                )
+                screen_text = tuple(
+                    ScreenTextEvidence.model_validate(item)
+                    for item in (result.get("report") or {}).get("items") or []
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "screen_text_unavailable",
+                    project_id=project_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
         return _VisionContext(
             project_id=project_id,
             goal=goal,
             workspace=self.workspaces.get(project_id),
             cache=self._cache_for(project_id),
             source_hash=self._source_hash(project_id, asset),
-            perception=self.get_perception(project_id),
+            perception=perception,
             cancel_token=cancel_token,
             usage_scope=usage_scope,
             token_budget=token_budget,
-            transcript=self.get_transcript(project_id),
-            evidence=evidence if (evidence or {}).get("available") else None,
+            transcript=transcript,
+            evidence_views=tuple(evidence_views),
+            route=route,
+            screen_text=screen_text,
         )
 
     def _vision_images(
@@ -286,11 +338,12 @@ class VisualMixin:
         ctx: _VisionContext,
         vision_items: list[dict],
     ) -> list[VisionImage]:
-        if ctx.evidence is not None:
+        if ctx.evidence_views:
             evidence_images = select_evidence_images(
                 ctx.workspace,
-                ctx.evidence,
+                list(ctx.evidence_views),
                 self.settings,
+                perception=ctx.perception,
             )
             if evidence_images:
                 return evidence_images
@@ -311,11 +364,38 @@ class VisualMixin:
             (str(item.get("id")), [str(path) for path in item.get("keyframes") or []])
             for item in vision_items
         ]
-        evidence = (ctx.evidence or {}).get("evidence") or {}
-        evidence_sig = (
-            evidence.get("id"),
-            evidence.get("render_hash"),
-            evidence.get("semantic_hash"),
+        evidence_sig = tuple(
+            (
+                view.get("kind"),
+                (view.get("evidence") or {}).get("id"),
+                (view.get("evidence") or {}).get("render_hash"),
+                (view.get("evidence") or {}).get("semantic_hash"),
+            )
+            for view in ctx.evidence_views
+        )
+        screen_sig = tuple(item.sha256 for item in ctx.screen_text)
+        measurement_sig = tuple(
+            (
+                view.get("kind"),
+                tuple(
+                    (
+                        item.get("tile_index"),
+                        item.get("d_hist"),
+                        item.get("flow_mag"),
+                        item.get("flow_dir_deg"),
+                        item.get("score"),
+                    )
+                    for item in (
+                        (view.get("evidence") or {}).get("measurements") or []
+                    )
+                ),
+            )
+            for view in ctx.evidence_views
+        )
+        route_sig = (
+            (ctx.route.policy_version, ctx.route.content_type, ctx.route.kinds)
+            if ctx.route is not None
+            else ("unrouted", None, ())
         )
         transcript_sig = (
             ctx.cache.key(ctx.transcript.model_dump_json())
@@ -324,7 +404,7 @@ class VisualMixin:
         )
         return ctx.cache.key(
             ctx.source_hash,
-            "vision_notes_v5",
+            "vision_notes_v8",
             self.settings.vision_base_url,
             self.settings.vision_model,
             self.settings.vision_prompt_version,
@@ -336,6 +416,9 @@ class VisualMixin:
             self.settings.vision_image_max_edge,
             self.settings.vision_use_evidence,
             evidence_sig,
+            measurement_sig,
+            screen_sig,
+            route_sig,
             transcript_sig,
             ctx.goal,
             image_paths,
@@ -396,7 +479,7 @@ class VisualMixin:
     ) -> tuple[dict[str, ImageVisualNote], int, dict[str, int]]:
         def image_key(image: VisionImage) -> str:
             return ctx.cache.key(
-                "vision_image_v2",
+                "vision_image_v3",
                 image.sha256,
                 self.settings.vision_base_url,
                 self.settings.vision_model,
@@ -467,7 +550,7 @@ class VisualMixin:
 
         # 同一图片批次 + prompt 的并发请求只执行一次。
         batch_key = ctx.cache.key(
-            "vision_batch_v1",
+            "vision_batch_v2",
             self.settings.vision_base_url,
             self.settings.vision_model,
             self.settings.vision_prompt_version,
@@ -520,6 +603,35 @@ class VisualMixin:
             )
         return chapter_notes
 
+    @staticmethod
+    def _attach_screen_text(
+        chapter_notes: list[ChapterVisualNote],
+        items: tuple[ScreenTextEvidence, ...],
+        vision_items: list[dict],
+    ) -> None:
+        if not items:
+            return
+        ranges: dict[str, tuple[float, float]] = {}
+        for item in vision_items:
+            chapter_id = str(item.get("id") or "")
+            start = seconds_from_mapping(item.get("start"))
+            end = seconds_from_mapping(item.get("end"))
+            if chapter_id and start is not None and end is not None:
+                ranges[chapter_id] = (float(start), float(end))
+        for note in chapter_notes:
+            span = ranges.get(note.chapter_id)
+            if span is None:
+                continue
+            texts: list[str] = []
+            for item in items:
+                if not (span[0] <= item.t.to_float() < span[1]):
+                    continue
+                if item.text not in texts:
+                    texts.append(item.text)
+                if len(texts) >= 5:
+                    break
+            note.screen_text = texts
+
     def _note_for_chapter(
         self,
         image: VisionImage,
@@ -548,19 +660,32 @@ class VisualMixin:
         refs = [ref for ref in note.evidence_refs if ref in labels]
         return note.model_copy(update={"evidence_refs": refs})
 
-    def _allowed_evidence_labels(self, ctx: _VisionContext) -> set[str]:
-        evidence = (ctx.evidence or {}).get("evidence") or {}
-        tiles = ((evidence.get("tile_map") or {}).get("tiles")) or []
-        return {str(tile.get("label")) for tile in tiles if tile.get("label")}
+    def _allowed_evidence_labels(
+        self,
+        ctx: _VisionContext,
+        views: list[dict] | tuple[dict, ...] | None = None,
+    ) -> set[str]:
+        """所有视图标签的并集；各视图标签区间由服务层保证不相交。"""
+        labels: set[str] = set()
+        for view in (ctx.evidence_views if views is None else views):
+            evidence = view.get("evidence") or {}
+            tiles = ((evidence.get("tile_map") or {}).get("tiles")) or []
+            labels.update(
+                str(tile.get("label")) for tile in tiles if tile.get("label")
+            )
+        return labels
 
     def _validate_evidence_refs(
         self,
         ctx: _VisionContext,
         notes: list[ImageVisualNote],
+        *,
+        views: list[dict] | tuple[dict, ...] | None = None,
     ) -> None:
-        if ctx.evidence is None:
+        target_views = ctx.evidence_views if views is None else views
+        if not target_views:
             return
-        allowed = self._allowed_evidence_labels(ctx)
+        allowed = self._allowed_evidence_labels(ctx, target_views)
         for note in notes:
             if not note.evidence_refs:
                 continue
@@ -569,6 +694,75 @@ class VisualMixin:
                 raise ValueError(
                     f"VLM 引用了不存在的证据标签: {sorted(unknown)}"
                 )
+
+    def _deep_evidence_kinds(
+        self,
+        ctx: _VisionContext,
+        chapter_notes: list[ChapterVisualNote],
+        flagged_ids: set[str],
+    ) -> list[str]:
+        """复核视图必须换 kind；压缩类风险优先 codec_residual，否则换 overview。"""
+        primary = ctx.route.primary if ctx.route is not None else "contact_sheet"
+        cautions = " ".join(
+            caution
+            for note in chapter_notes
+            if note.chapter_id in flagged_ids
+            for caution in note.cautions
+        )
+        compression = any(
+            word in cautions for word in ("压缩", "码率", "画质", "块状", "涂抹")
+        )
+        if compression:
+            overview = "codec_residual"
+        elif primary != "bbox_overlay":
+            overview = "bbox_overlay"
+        else:
+            overview = "contact_sheet"
+        if overview == primary:
+            overview = (
+                "contact_sheet" if primary != "contact_sheet" else "bbox_overlay"
+            )
+        limit = max(1, int(self.settings.vision_max_images))
+        if primary == "roi_crop":
+            return [overview][:limit]
+        if limit == 1:
+            return ["roi_crop"]
+        return [overview, "roi_crop"][:limit]
+
+    @staticmethod
+    def _most_anomalous_moment(
+        kind: str,
+        results: list[dict],
+    ) -> RationalTime | None:
+        """roi_crop 从已渲染 overview 的 measurements 中选 score 最高的时刻。
+
+        返回时间而非索引，避免 dedupe 后 tile_index 与原始帧列表错位。
+        """
+        if kind != "roi_crop":
+            return None
+        for result in reversed(results):
+            if not (result or {}).get("available"):
+                continue
+            evidence = result.get("evidence") or {}
+            measurements = evidence.get("measurements") or []
+            tiles = ((evidence.get("tile_map") or {}).get("tiles")) or []
+            count = min(len(measurements), len(tiles))
+            if count <= 0:
+                continue
+            best = max(
+                range(count),
+                key=lambda index: float(
+                    measurements[index].get("score") or 0.0
+                ),
+            )
+            moment = tiles[best].get("t")
+            if moment is None:
+                continue
+            try:
+                return RationalTime.model_validate(moment)
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def _second_pass_notes(
         self,
@@ -591,11 +785,39 @@ class VisualMixin:
 
         chapter_map = {str(item.get("id")): item for item in vision_items}
         flagged_items = [
-            chapter_map[chapter_id]
-            for chapter_id in flagged_ids
-            if chapter_id in chapter_map
+            item
+            for item in vision_items
+            if str(item.get("id")) in flagged_ids
         ]
-        deep_images = self._vision_images(ctx, flagged_items)
+        if not flagged_items:
+            return second_pass_images, deep_images, second_pass_chapters, usage
+        flagged_chapter_ids = [str(item.get("id")) for item in flagged_items]
+        deep_views = self.build_visual_evidence_set(
+            ctx.project_id,
+            self._deep_evidence_kinds(ctx, chapter_notes, flagged_ids),
+            chapter_ids=flagged_chapter_ids,
+            cancel_token=ctx.cancel_token,
+            label_start=1
+            + sum(
+                self._evidence_tile_count(view)
+                for view in ctx.evidence_views
+            ),
+            dedupe=False,
+            roi_target_resolver=self._most_anomalous_moment,
+        )
+        deep_views = [
+            view for view in deep_views if (view or {}).get("available")
+        ]
+        deep_images = (
+            select_evidence_images(
+                ctx.workspace,
+                deep_views,
+                self.settings,
+                perception=ctx.perception,
+            )
+            if deep_views
+            else []
+        )
         flagged_images = [
             VisionImage(
                 label=f"复核：{image.label}",
@@ -614,7 +836,7 @@ class VisualMixin:
 
         def deep_key(image: VisionImage) -> str:
             return ctx.cache.key(
-                "vision_image_deep_v2",
+                "vision_image_deep_v4",
                 image.sha256,
                 self.settings.vision_base_url,
                 self.settings.vision_model,
@@ -659,7 +881,9 @@ class VisualMixin:
                     usage_scope=ctx.usage_scope,
                     token_budget=ctx.token_budget,
                 )
-                self._validate_evidence_refs(ctx, notes.images)
+                self._validate_evidence_refs(
+                    ctx, notes.images, views=deep_views
+                )
                 by_index = {item.image_index: item for item in notes.images}
                 for index, image in enumerate(missing):
                     note = by_index.get(index)
@@ -682,7 +906,7 @@ class VisualMixin:
             return deep_notes
 
         deep_batch_key = ctx.cache.key(
-            "vision_batch_deep_v1",
+            "vision_batch_deep_v3",
             self.settings.vision_base_url,
             self.settings.vision_model,
             self.settings.vision_prompt_version,
@@ -764,6 +988,138 @@ class VisualMixin:
             or "；".join(item.summary for item in chapter_notes[:3] if item.summary)
         )
 
+    def _visual_facts(
+        self,
+        ctx: _VisionContext,
+        vision_items: list[dict],
+    ) -> list[dict]:
+        """按章节聚合数值事实，供 Planner 的 visual_facts 段使用。"""
+        perception = ctx.perception or {}
+        risks: list[tuple[float, str]] = []
+        for mark in (perception.get("quality") or {}).get("marks") or []:
+            kind = str(mark.get("kind") or "")
+            seconds = seconds_from_mapping(mark.get("t"))
+            if (
+                kind in {"black", "frozen", "blurry", "duplicate"}
+                and seconds is not None
+            ):
+                risks.append((float(seconds), kind))
+
+        frame_times: list[float] = []
+        for frame in perception.get("frame_manifest") or []:
+            seconds = seconds_from_mapping(frame.get("t"))
+            if seconds is not None:
+                frame_times.append(float(seconds))
+        face_times: list[float] = []
+        for anchor in (perception.get("faces") or {}).get("anchors") or []:
+            seconds = seconds_from_mapping(anchor.get("t"))
+            if seconds is not None:
+                face_times.append(float(seconds))
+
+        measurements: list[tuple[float, int, dict]] = []
+        for view in ctx.evidence_views:
+            evidence = view.get("evidence") or {}
+            tiles = ((evidence.get("tile_map") or {}).get("tiles")) or []
+            items = evidence.get("measurements") or []
+            for index, (tile, item) in enumerate(zip(tiles, items)):
+                seconds = seconds_from_mapping(tile.get("t"))
+                if seconds is None:
+                    continue
+                measurements.append((float(seconds), index, item))
+
+        kinds = list(ctx.route.kinds) if ctx.route is not None else []
+        facts: list[dict] = []
+        for chapter in vision_items[:60]:
+            chapter_id = str(chapter.get("id") or "")
+            start = seconds_from_mapping(chapter.get("start"))
+            end = seconds_from_mapping(chapter.get("end"))
+            if not chapter_id or start is None or end is None:
+                continue
+            start_seconds = float(start)
+            end_seconds = float(end)
+            inside = [
+                item
+                for moment, index, item in measurements
+                if start_seconds <= moment < end_seconds
+            ]
+            hist_values = [
+                float(item["d_hist"])
+                for moment, index, item in measurements
+                if start_seconds <= moment < end_seconds
+                and index > 0
+                and item.get("d_hist") is not None
+            ]
+            mean_d_hist = (
+                sum(hist_values) / len(hist_values) if hist_values else 0.0
+            )
+            flows = [
+                float(item["flow_mag"])
+                for moment, index, item in measurements
+                if start_seconds <= moment < end_seconds
+                and item.get("flow_mag") is not None
+            ]
+            if flows:
+                motion_value = sum(flows) / len(flows)
+                motion_level = (
+                    "low"
+                    if motion_value < 0.5
+                    else "medium" if motion_value < 2.0 else "high"
+                )
+            else:
+                motion_level = (
+                    "low"
+                    if mean_d_hist < 0.15
+                    else "medium" if mean_d_hist < 0.4 else "high"
+                )
+            frames_in = [
+                moment
+                for moment in frame_times
+                if start_seconds <= moment < end_seconds
+            ]
+            faces_in = [
+                moment
+                for moment in face_times
+                if start_seconds <= moment < end_seconds
+            ]
+            if frames_in:
+                face_coverage = min(1.0, len(faces_in) / len(frames_in))
+            else:
+                bbox_count = sum(
+                    1
+                    for item in inside
+                    if item.get("bbox_xywh") is not None
+                )
+                face_coverage = bbox_count / len(inside) if inside else 0.0
+            camera_motions = [
+                str(item["camera_motion"])
+                for moment, index, item in measurements
+                if start_seconds <= moment < end_seconds
+                and item.get("camera_motion") not in (None, "unknown")
+            ]
+            camera_motion = (
+                max(set(camera_motions), key=camera_motions.count)
+                if camera_motions
+                else "unknown"
+            )
+            facts.append(
+                {
+                    "chapter_id": chapter_id,
+                    "view_kinds": kinds,
+                    "face_coverage": round(face_coverage, 3),
+                    "mean_d_hist": round(mean_d_hist, 3),
+                    "motion_level": motion_level,
+                    "camera_motion": camera_motion,
+                    "quality_risks": sorted(
+                        {
+                            kind
+                            for moment, kind in risks
+                            if start_seconds <= moment < end_seconds
+                        }
+                    ),
+                }
+            )
+        return facts
+
     def _finish_visual_notes(
         self,
         *,
@@ -779,6 +1135,7 @@ class VisualMixin:
         second_pass_images: int,
         second_pass_chapters: int,
         usage: dict[str, int],
+        visual_facts: list[dict],
     ) -> dict | None:
         duration_ms = int((time.perf_counter() - started) * 1000)
         if not chapter_notes and not overall:
@@ -797,14 +1154,22 @@ class VisualMixin:
             return None
 
         total_images = len(images) + second_pass_images
-        evidence = (ctx.evidence or {}).get("evidence") or {}
-        evidence_ids = [str(evidence.get("id"))] if evidence.get("id") else []
+        evidence_ids = [
+            str((view.get("evidence") or {}).get("id"))
+            for view in ctx.evidence_views
+            if (view.get("evidence") or {}).get("id")
+        ]
         payload = VisualNotes(
             chapters=chapter_notes,
             overall=overall,
             model=self.vision.model,
             image_count=total_images,
             evidence_ids=evidence_ids,
+            view_kinds=(
+                list(ctx.route.kinds) if ctx.route is not None else []
+            ),
+            visual_facts=visual_facts,
+            screen_text=list(ctx.screen_text[:60]),
         ).model_dump(mode="json")
         image_bytes = sum(image.size for image in images) + sum(
             image.size for image in deep_images
@@ -828,6 +1193,8 @@ class VisualMixin:
                 "second_pass_chapters": second_pass_chapters,
                 "duration_ms": duration_ms,
                 "model": self.vision.model,
+                "route": ctx.route.content_type if ctx.route is not None else None,
+                "view_kinds": list(ctx.route.kinds) if ctx.route is not None else [],
             },
         )
         self._set_vision_metrics(
@@ -845,6 +1212,9 @@ class VisualMixin:
                 "second_pass_images": second_pass_images,
                 "second_pass_chapters": second_pass_chapters,
                 "duration_ms": duration_ms,
+                "route": ctx.route.content_type if ctx.route is not None else None,
+                "view_kinds": list(ctx.route.kinds) if ctx.route is not None else [],
+                "screen_text_items": len(ctx.screen_text),
                 "prompt_tokens": usage["prompt_tokens"],
                 "completion_tokens": usage["completion_tokens"],
                 "total_tokens": usage["total_tokens"],

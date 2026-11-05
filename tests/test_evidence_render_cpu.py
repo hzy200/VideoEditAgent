@@ -92,6 +92,39 @@ def test_duplicate_tiles_are_removed_and_reindexed() -> None:
     assert measure.tile_map.tiles[0].label == "T01"
 
 
+def test_render_many_and_synthesize_many() -> None:
+    measure = measure_tiles(
+        _tiles(),
+        content_id="p_evidence",
+        time_base="1/30",
+        grid_cols=2,
+    )
+    requests = [
+        _request(),
+        _request().model_copy(
+            update={"kind": "bbox_overlay", "grid_cols": 1}
+        ),
+    ]
+    renderer = CpuEvidenceRenderer()
+    rendered = renderer.render_many(measure, requests)
+    assert len(rendered) == 2
+    assert all(item.png_bytes for item in rendered)
+    assert rendered[0].png_bytes == renderer.render(measure, requests[0]).png_bytes
+
+    synthesizer = ViewSynthesizer(renderer)
+    items = synthesizer.synthesize_many(
+        measure,
+        requests,
+        source_ref={"content_id": "p_evidence", "media_sha256_16": "b" * 16},
+        image_refs=["cache/evidence/a/view.png", "cache/evidence/b/view.png"],
+    )
+    assert len(items) == 2
+    assert items[0].evidence.kind == "contact_sheet"
+    assert items[1].evidence.kind == "bbox_overlay"
+    assert items[0].evidence.id != items[1].evidence.id
+    assert items[0].evidence.render_hash != items[1].evidence.render_hash
+
+
 def test_synthesizer_hashes_and_meta() -> None:
     measure = measure_tiles(
         _tiles(),

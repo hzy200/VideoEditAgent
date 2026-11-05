@@ -232,12 +232,16 @@ def _merge_faces(
     for anchor in update.anchors:
         anchors[(anchor.t.to_float(), anchor.x, anchor.y)] = anchor
     ordered = sorted(anchors.values(), key=lambda item: item.t.to_float())
+    from smartcut.perception.faces import derive_tracks
+
     return FaceReport(
         src=update.src or previous.src,
         frame_width=update.frame_width or previous.frame_width,
         frame_height=update.frame_height or previous.frame_height,
         sampled_fps=update.sampled_fps or previous.sampled_fps,
         anchors=ordered,
+        tracks=derive_tracks(ordered),
+        tracking_version=update.tracking_version or previous.tracking_version,
         engine=update.engine or previous.engine,
     )
 

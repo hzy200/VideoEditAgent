@@ -37,6 +37,8 @@ PRUNABLE_KINDS = frozenset(
         "transcripts",
         "audio_chunks",
         "evidence",
+        "ocr_frame",
+        "screen_text",
     }
 )
 

@@ -254,12 +254,61 @@ def visual_notes_payload(notes: dict | None) -> dict | None:
                 "visual_tags": item.get("visual_tags") or [],
                 "cautions": item.get("cautions") or [],
                 "evidence_refs": list(item.get("evidence_refs") or [])[:8],
+                "screen_text": list(item.get("screen_text") or [])[:5],
             }
             for item in items[:60]
         ],
         "image_count": notes.get("image_count", 0),
         "model": notes.get("model"),
         "evidence_ids": list(notes.get("evidence_ids") or [])[:8],
+        "view_kinds": list(notes.get("view_kinds") or [])[:8],
+        "screen_text": [
+            {
+                "t": seconds_from_mapping(item.get("t")),
+                "text": item.get("text") or "",
+                "confidence": round(float(item.get("confidence") or 0.0), 3),
+                "stability": round(float(item.get("stability") or 0.0), 3),
+            }
+            for item in (notes.get("screen_text") or [])[:60]
+        ],
+    }
+
+
+def visual_facts_payload(
+    visual_notes: dict | None,
+    *,
+    chapter_ids: list[str] | None = None,
+    limit: int = 40,
+) -> dict | None:
+    """Planner 的紧凑数值视图：只看章节事实，不传坐标/路径。"""
+    if not visual_notes:
+        return None
+    facts = list(visual_notes.get("visual_facts") or [])
+    selected = set(chapter_ids or [])
+    if selected:
+        facts = [item for item in facts if item.get("chapter_id") in selected]
+    facts = facts[: max(1, int(limit))]
+    if not facts:
+        return None
+    return {
+        "view_kinds": list(visual_notes.get("view_kinds") or [])[:8],
+        "chapter_count": len(facts),
+        "chapters": [
+            {
+                "chapter_id": item.get("chapter_id"),
+                "view_kinds": list(item.get("view_kinds") or [])[:8],
+                "face_coverage": round(
+                    float(item.get("face_coverage") or 0.0), 3
+                ),
+                "mean_d_hist": round(
+                    float(item.get("mean_d_hist") or 0.0), 3
+                ),
+                "motion_level": item.get("motion_level") or "unknown",
+                "camera_motion": item.get("camera_motion") or "unknown",
+                "quality_risks": list(item.get("quality_risks") or [])[:6],
+            }
+            for item in facts
+        ],
     }
 
 
@@ -474,6 +523,10 @@ def build_context(
         "chapters": chapters_payload(chapters),
         "candidates": candidates_payload(candidates, max_tokens=candidate_budget),
         "visual_notes": visual_notes_payload(visual_notes),
+        "visual_facts": visual_facts_payload(
+            visual_notes,
+            chapter_ids=chapter_ids,
+        ),
         "timeline": timeline_payload(timeline),
         "memory": memory_payload(memory, chapter_ids=chapter_ids),
         "preference": preference_payload(preference),

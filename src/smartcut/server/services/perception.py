@@ -69,6 +69,7 @@ from smartcut.orchestrator.context import accepts_keyword
 from smartcut.perception import candidates as candidates_mod
 from smartcut.perception import chapters as chapters_mod
 from smartcut.perception import chunking
+from smartcut.perception import cluster as cluster_mod
 from smartcut.perception import contactsheet as contactsheet_mod
 from smartcut.perception import faces as faces_mod
 from smartcut.perception import frames as frames_mod
@@ -77,6 +78,7 @@ from smartcut.perception import memory as memory_mod
 from smartcut.perception import process_pool
 from smartcut.perception import quality as quality_mod
 from smartcut.perception import scenes as scenes_mod
+from smartcut.perception.view import fingerprint
 from smartcut.perception.transcribe import Transcriber, build_transcriber
 from smartcut.planner.client import DeepSeekPlanner
 from smartcut.planner.context import filter_transcript_to_chapters
@@ -526,9 +528,11 @@ class PerceptionMixin:
         key = cache.key(
             frames_record["cache_key"],
             scenes_record["cache_key"] if scenes_record else None,
-            "quality_chapter_v1" if chapter_ids else "quality_v2",
+            "quality_chapter_v2" if chapter_ids else "quality_v3",
             self.settings.perception_max_frames,
             sorted(chapter_ids or []),
+            fingerprint.FINGERPRINT_VERSION,
+            fingerprint.engine(),
         )
         cached_record = cache.get(project_id, kind, key, source_hash)
         if cached_record is not None:
@@ -662,9 +666,13 @@ class PerceptionMixin:
         key = cache.key(
             frames_record["cache_key"],
             scenes_record["cache_key"] if scenes_record else None,
-            "faces_chapter_v1" if chapter_ids else "faces_v2",
+            "faces_chapter_v2" if chapter_ids else "faces_v3",
             self.settings.perception_max_frames,
             sorted(chapter_ids or []),
+            self.settings.face_tracking_enabled,
+            self.settings.face_track_iou_threshold,
+            self.settings.face_track_max_gap_seconds,
+            self.settings.face_smoothing_alpha,
         )
         cached_record = cache.get(project_id, kind, key, source_hash)
         if cached_record is not None:
@@ -711,6 +719,10 @@ class PerceptionMixin:
             asset.src,
             sampled_fps=1.0,
             max_workers=workers,
+            tracking=self.settings.face_tracking_enabled,
+            track_iou_threshold=self.settings.face_track_iou_threshold,
+            track_max_gap_seconds=self.settings.face_track_max_gap_seconds,
+            smoothing_alpha=self.settings.face_smoothing_alpha,
             slot=(
                 partial(self.resources.cpu_slot, cancel_token=cancel_token)
                 if cancel_token is not None
@@ -856,8 +868,11 @@ class PerceptionMixin:
         key = cache.key(
             source_hash,
             frames_record["cache_key"],
-            "chapters_v1",
+            "chapters_v2",
             self.settings.chapter_target_seconds,
+            self.settings.chapter_clustering_enabled,
+            self.settings.chapter_cluster_similarity,
+            cluster_mod.CLUSTER_VERSION,
             transcript_sig,
         )
         cached = cache.get_json(project_id, "chapters", key, source_hash)
@@ -885,6 +900,23 @@ class PerceptionMixin:
         frames = frames_mod.read_manifest(
             cache.resolve(frames_record["path"]) / "manifest.json"
         )
+        clusters = None
+        if self.settings.chapter_clustering_enabled and shots is not None:
+            try:
+                clusters = cluster_mod.cluster_shots(
+                    shots,
+                    frames,
+                    workspace.root,
+                    facts.duration.to_float(),
+                    similarity=self.settings.chapter_cluster_similarity,
+                )
+            except Exception as exc:
+                self.logger.warning(
+                    "shot_clustering_failed",
+                    project_id=project_id,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                clusters = None
         plan = chapters_mod.build_chapters(
             facts,
             shots,
@@ -893,6 +925,11 @@ class PerceptionMixin:
             faces,
             frames,
             target_seconds=self.settings.chapter_target_seconds,
+            shot_clusters=(
+                [(item.start, item.end) for item in clusters]
+                if clusters
+                else None
+            ),
         )
         if cancel_token is not None:
             cancel_token.raise_if_cancelled()
@@ -993,7 +1030,9 @@ class PerceptionMixin:
             source_hash,
             frames_record["cache_key"],
             "candidates_v2",
-            "dhash_v1",
+            "dhash_v2",
+            fingerprint.FINGERPRINT_VERSION,
+            fingerprint.engine(),
             self.settings.candidate_target_seconds,
             self.settings.candidate_max,
             transcript_sig,
@@ -1443,15 +1482,18 @@ class PerceptionMixin:
             )
         scoped_faces = faces
         if faces is not None:
+            scoped_anchors = [
+                anchor for anchor in faces.anchors
+                if inside(anchor.t.to_float())
+            ]
             scoped_faces = FaceReport(
                 src=faces.src,
                 frame_width=faces.frame_width,
                 frame_height=faces.frame_height,
                 sampled_fps=faces.sampled_fps,
-                anchors=[
-                    anchor for anchor in faces.anchors
-                    if inside(anchor.t.to_float())
-                ],
+                anchors=scoped_anchors,
+                tracks=faces_mod.derive_tracks(scoped_anchors),
+                tracking_version=faces.tracking_version,
                 engine=faces.engine,
             )
         scoped_notes = [note for note in notes if note.chapter_id in wanted]

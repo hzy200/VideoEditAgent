@@ -20,3 +20,9 @@ class EvidenceRenderer(Protocol):
         measure: MeasureResult,
         request: ViewRequest,
     ) -> RenderedImage: ...
+
+    def render_many(
+        self,
+        measure: MeasureResult,
+        requests: list[ViewRequest],
+    ) -> list[RenderedImage]: ...

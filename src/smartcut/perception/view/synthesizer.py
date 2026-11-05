@@ -45,6 +45,65 @@ class ViewSynthesizer:
         ir_revision: int | None = None,
     ) -> SynthesizedEvidence:
         rendered = self.renderer.render(measure, request)
+        return self._build(
+            measure,
+            request,
+            rendered,
+            source_ref=source_ref,
+            image_ref=image_ref,
+            ffmpeg_version=ffmpeg_version,
+            opencv_version=opencv_version,
+            ir_revision=ir_revision,
+        )
+
+    def synthesize_many(
+        self,
+        measure: MeasureResult,
+        requests: list[ViewRequest],
+        *,
+        source_ref: dict[str, Any],
+        image_refs: list[str],
+        ffmpeg_version: str = "unknown",
+        opencv_version: str = "unknown",
+        ir_revision: int | None = None,
+    ) -> list[SynthesizedEvidence]:
+        """一次渲染调用输出多个网格/kind；渲染器可复用 context 与解码图片。"""
+        if len(image_refs) != len(requests):
+            raise ValueError("image_refs 必须与 requests 等长")
+        render_many = getattr(self.renderer, "render_many", None)
+        rendered_items = (
+            render_many(measure, requests)
+            if callable(render_many)
+            else [self.renderer.render(measure, request) for request in requests]
+        )
+        return [
+            self._build(
+                measure,
+                request,
+                rendered,
+                source_ref=source_ref,
+                image_ref=image_ref,
+                ffmpeg_version=ffmpeg_version,
+                opencv_version=opencv_version,
+                ir_revision=ir_revision,
+            )
+            for request, rendered, image_ref in zip(
+                requests, rendered_items, image_refs
+            )
+        ]
+
+    def _build(
+        self,
+        measure: MeasureResult,
+        request: ViewRequest,
+        rendered: RenderedImage,
+        *,
+        source_ref: dict[str, Any],
+        image_ref: str,
+        ffmpeg_version: str,
+        opencv_version: str,
+        ir_revision: int | None,
+    ) -> SynthesizedEvidence:
         rows = grid_rows(len(measure.tile_map.tiles), request.grid_cols)
         constants = measure.constants
         meta = {
@@ -52,6 +111,14 @@ class ViewSynthesizer:
             "policy_version": request.policy_version,
             "ffmpeg_version": ffmpeg_version,
             "opencv_version": opencv_version,
+            "fingerprint_version": constants.get(
+                "fingerprint_version", "unknown"
+            ),
+            "fingerprint_engine": constants.get("fingerprint_engine", "unknown"),
+            "motion_split_version": constants.get(
+                "motion_split_version", "none"
+            ),
+            "measure_backend": constants.get("measure_backend", "cpu"),
             "fps_sample": constants.get("fps_sample", 0.0),
             "dedup_threshold": constants.get("dedupe_threshold", 0),
             "scene_threshold_pct": constants.get("scene_threshold_pct", 0.0),

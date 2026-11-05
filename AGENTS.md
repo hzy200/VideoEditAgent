@@ -89,6 +89,35 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
   `actual_encoder`；默认 libx264 argv 必须与旧 golden 一致。
 - 视觉摘要：只有显式配置 VLM 才发送图片；必须限制图片数量/尺寸/字节，
   失败降级为文本规划，不得阻断渲染。
+- 多视图证据必须为每个视图分配不相交的 `Txx` 区间；`evidence_refs` 白名单按
+  本次全部 TileMap 的并集校验，但跨视图同名标签不得视为合法。
+- 证据视图路由必须来自 `policies/vision.json` 的 `routing`；kind 必须属于
+  `ViewKind`，default 必须回退 `contact_sheet`，路由版本必须进入缓存键。
+- 同一次规划的多视图必须复用同一候选窗口与原始帧抽帧；仅 `roi_crop` 高分辨率
+  与 `codec_residual` 允许单独抽帧。
+- Measurement 只作为 prompt 事实（d_hist/flow/face/risk）；缺失字段不得补造，
+  首帧 `d_hist=1.0` 占位值不得注入。
+- 二次复核必须对 flagged 章节构建 scoped 新视图（不同 kind + ROI），不得重复
+  发送主视图；ROI 必须按 measurements.score 选最异常时刻（时间定位），不得
+  固定 tile 1 或用 dedupe 后的索引直接定位原始帧。
+- Planner 的 `visual_facts` 只含章节级数值（view_kinds/face_coverage/
+  mean_d_hist/motion_level/quality_risks），不得含坐标或路径；默认限制前 40 章，
+  并优先按 `chapter_ids` 过滤。
+- 屏幕文字只作候选事实：OCR 重依赖只能在 `ocr_worker.py` 进程内加载，主进程
+  禁止 import rapidocr/pytesseract；缓存键必须含 source_hash+frame_sha256+
+  worker_version+policy_version；不得写 IR。
+- 人脸跟踪必须输出 `track_id` 与出现区间，并对同一 track 平滑锚点；跟踪/平滑
+  参数必须进入 faces 缓存键。
+- 相机/主体运动必须由 RANSAC 仿射拆分；camera/subject/motion 只作测量事实，
+  只在 flow 视图产生，不得写 IR。
+- 镜头聚类只允许在视觉簇边界处切章；聚类版本与阈值必须进入 chapters 缓存键。
+- dHash/直方图必须来自 `perception/view/fingerprint.py`；版本与 engine 必须进入
+  证据/质量/候选缓存键，cv2 缺失时保留 Pillow fallback。
+- `render_many` 只做拼版/编号/bbox；一次 context + 解码图片缓存，禁止在
+  shader/渲染器内计算光流或直方图。
+- GpuMeasurer 必须与 renderer 解耦，只输出数值 MeasureResult；必须有 CPU 等价
+  路径与容差比对，失败回退 CPU 并记录 `measure_backend`；该字段不得进入
+  `render_hash`。
 - `src/smartcut/policies/*.json` 与代码同步；新增 agent/tool/encoder 时
   必须更新策略并运行 `scripts/check_drift.py`。
 - 新增数据库列/表必须提供只增不删的迁移与旧库测试。
@@ -257,6 +286,10 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
 - 让 OpenCV 进程池在没有取消/watchdog 的情况下无限等待卡死帧。
 - 仅凭 `ffmpeg -encoders` 列表就把硬件编码器标记为可用。
 - 视觉摘要命中整图缓存后仍打开/缩放图片，或图片未变时重新请求整批图片。
+- 用单张 TileMap 的白名单校验多视图 `evidence_refs`，或让多个视图复用同一
+  `T01`/`T02` 标签。
+- 绕过 `vision.json` 的 `routing` 硬编码视图组合，或把 `default` 指向非
+  `contact_sheet` 的高风险视图。
 - 在感知线程中共享 Haar Cascade 对象，或绕开逐帧 `cpu_slot`。
 - 在时间线拖拽/表格编辑时直接提交 revision 或覆盖源文件。
 - 让全局快捷键在 QLineEdit/QTextEdit/单元格编辑中吞掉输入。

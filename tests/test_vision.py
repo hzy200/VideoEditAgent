@@ -18,7 +18,7 @@ from smartcut.contracts.vision import (
 from smartcut.errors import LLMResponseError
 from smartcut.llm.vision import VisionClient
 from smartcut.perception.transcribe import NullTranscriber
-from smartcut.planner.context import build_context
+from smartcut.planner.context import build_context, visual_facts_payload
 from smartcut.planner.vision import (
     VisionImage,
     build_image_note_messages,
@@ -167,11 +167,62 @@ def test_visual_notes_enter_planner_context() -> None:
             ],
             "image_count": 2,
             "model": "vlm-test",
+            "view_kinds": ["bbox_overlay", "roi_crop"],
+            "visual_facts": [
+                {
+                    "chapter_id": "ch_0001",
+                    "view_kinds": ["bbox_overlay", "roi_crop"],
+                    "face_coverage": 0.42,
+                    "mean_d_hist": 0.18,
+                    "motion_level": "low",
+                    "quality_risks": ["blurry"],
+                }
+            ],
         },
     )
     assert context["visual_notes"]["overall"] == "室内口播"
     assert context["visual_notes"]["chapters"][0]["chapter_id"] == "ch_0001"
     assert context["visual_notes"]["image_count"] == 2
+    assert context["visual_notes"]["view_kinds"] == ["bbox_overlay", "roi_crop"]
+    assert context["visual_facts"]["chapter_count"] == 1
+    facts = context["visual_facts"]["chapters"][0]
+    assert facts["chapter_id"] == "ch_0001"
+    assert facts["face_coverage"] == 0.42
+    assert facts["mean_d_hist"] == 0.18
+    assert facts["motion_level"] == "low"
+    assert facts["quality_risks"] == ["blurry"]
+
+
+def test_visual_facts_payload_filters_and_limits() -> None:
+    notes = {
+        "view_kinds": ["contact_sheet"],
+        "visual_facts": [
+            {
+                "chapter_id": f"ch_{index:04d}",
+                "view_kinds": ["contact_sheet"],
+                "face_coverage": 0.1,
+                "mean_d_hist": 0.2,
+                "motion_level": "low",
+                "quality_risks": [],
+            }
+            for index in range(60)
+        ],
+    }
+    payload = visual_facts_payload(notes, limit=20)
+    assert payload is not None
+    assert payload["chapter_count"] == 20
+    assert payload["chapters"][0]["chapter_id"] == "ch_0000"
+
+    selected = visual_facts_payload(
+        notes,
+        chapter_ids=["ch_0003", "ch_0007"],
+    )
+    assert selected is not None
+    assert [item["chapter_id"] for item in selected["chapters"]] == [
+        "ch_0003",
+        "ch_0007",
+    ]
+    assert visual_facts_payload(None) is None
 
 
 class FakePlanner:

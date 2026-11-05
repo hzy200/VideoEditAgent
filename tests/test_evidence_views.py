@@ -21,7 +21,7 @@ from smartcut.perception.view.flow import (
     flow_strip,
     temporal_composite,
 )
-from smartcut.perception.view.measure import TileInput
+from smartcut.perception.view.measure import TileInput, measure_tiles
 from smartcut.perception.view.views import (
     build_flow_strip,
     build_roi,
@@ -45,6 +45,61 @@ def _image(offset: int) -> bytes:
     buffer = BytesIO()
     image.save(buffer, format="JPEG", quality=90)
     return buffer.getvalue()
+
+
+def _pattern_bytes(shift: int = 0) -> bytes:
+    import numpy as np
+
+    array = np.zeros((90, 160, 3), dtype=np.uint8)
+    array[::8, :, :] = 220
+    array[:, ::8, :] = 180
+    array = np.roll(array, shift, axis=1)
+    image = Image.fromarray(array, mode="RGB")
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def _subject_motion_bytes(offset: int) -> bytes:
+    image = Image.new("RGB", (160, 90), (20, 20, 20))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((20 + offset, 25, 70 + offset, 65), fill=(240, 240, 240))
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=95)
+    return buffer.getvalue()
+
+
+def test_flow_splits_camera_and_subject_motion() -> None:
+    camera = flow_between(_pattern_bytes(0), _pattern_bytes(10))
+    assert camera.camera_mag > camera.subject_mag
+    assert camera.camera_motion in {"pan", "tilt", "camera", "zoom"}
+
+    subject = flow_between(
+        _subject_motion_bytes(0),
+        _subject_motion_bytes(40),
+    )
+    assert subject.subject_mag > subject.camera_mag
+
+
+def test_measure_accepts_camera_subject_metrics() -> None:
+    result = measure_tiles(
+        [TileInput(t=_rt("0"), pts=0, frame_no=0, image_bytes=_image(0))],
+        content_id="p_motion",
+        time_base="1/30",
+        extra_metrics=[
+            {
+                "flow_mag": 1.0,
+                "flow_dir_deg": 90.0,
+                "camera_mag": 0.7,
+                "subject_mag": 0.3,
+                "camera_motion": "pan",
+            }
+        ],
+    )
+    measurement = result.measurements[0]
+    assert measurement.camera_mag == 0.7
+    assert measurement.subject_mag == 0.3
+    assert measurement.camera_motion == "pan"
 
 
 def test_flow_channels_and_strips() -> None:

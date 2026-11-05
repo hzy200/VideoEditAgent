@@ -10,5 +10,44 @@
   "text_min_chars": 40,
   "chapter_tiles": true,
   "second_pass_cautions": 2,
-  "mime_types": ["image/jpeg", "image/png"]
+  "mime_types": ["image/jpeg", "image/png"],
+  "routing": {
+    "version": "route@1.0",
+    "default": "generic",
+    "face_coverage_threshold": 0.3,
+    "shot_rate_threshold": 0.5,
+    "transcript_chars_per_second_threshold": 2.0,
+    "types": [
+      {
+        "id": "talking_head",
+        "primary": "bbox_overlay",
+        "extras": ["roi_crop"],
+        "keywords": ["口播", "访谈", "讲解", "主播", "人物"]
+      },
+      {
+        "id": "screen_content",
+        "primary": "contact_sheet",
+        "extras": ["roi_crop"],
+        "keywords": ["教程", "录屏", "课件", "PPT", "代码", "图表"]
+      },
+      {
+        "id": "motion_demo",
+        "primary": "temporal_diff",
+        "extras": ["flow_strip"],
+        "keywords": ["运动", "比赛", "舞蹈", "动作", "演示", "操作"]
+      },
+      {
+        "id": "compression_suspect",
+        "primary": "contact_sheet",
+        "extras": ["codec_residual"],
+        "keywords": ["压缩", "画质", "码率", "残差"]
+      },
+      {
+        "id": "generic",
+        "primary": "contact_sheet",
+        "extras": [],
+        "keywords": []
+      }
+    ]
+  }
 }

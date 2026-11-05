@@ -1,7 +1,7 @@
 # SmartCut 工作流与性能优化计划
 
 - 状态：P0/P1/P2/P3 已完成（2026-11-02）；后续视觉证据层见 `docs/VISION.md`，
-  最新测试基线以 README 为准（527 collected / 519 passed + 8 skipped）
+  最新测试基线以 README 为准（560 collected / 551 passed + 9 skipped）
 - 日期：2026-11-02
 - 范围：视频理解、抽帧与 VLM、结构化元数据、并行/GPU、测试与回归
 - 关联文档：`docs/PERFORMANCE.md`、`docs/VISION.md`、`docs/MEDIA_PIPELINE.md`
@@ -19,7 +19,7 @@
 - 两阶段大纲、硬件编码、Proxy-first；
 - 多轨音频与 Demucs 伴生 worker（CUDA 已验证）；
 - 本轮历史基线：232 项全量测试（230 passed + 2 skipped），live 2 passed；
-  当前全量测试见 README（527 collected / 519 passed + 8 skipped）。
+  当前全量测试见 README（560 collected / 551 passed + 9 skipped）。
 
 但长视频、复杂画面和多模态调用仍存在成本和耗时压力，主要来自：
 
@@ -51,7 +51,7 @@
 ### 3.1 当前基线
 
 - 本轮历史默认测试：**232 collected，230 passed + 2 skipped（live）**；
-  当前基线：**527 collected，519 passed + 8 skipped**
+  当前基线：**560 collected，551 passed + 9 skipped**
 - live DeepSeek：**2 passed**
 - `scripts/check_drift.py`：通过
 - 开发态 `--smoke-test`：退出 0
@@ -265,7 +265,13 @@ Demucs/转写 → 静音/话题边界 → 抽帧 → 视觉 notes → Plan
 - 转写：faster-whisper 在 CUDA 可用时可走 GPU；
   - 不要多 worker 共享同一 CTranslate2 模型。
 - OpenCV CUDA：收益不稳定、打包困难，优先级低；
-  - 先用进程池。
+  - 先用进程池；
+  - **不在 GL shader 内计算光流/帧差/直方图**（会破坏 render_hash 与 CPU/GL
+    语义等价）；
+  - 已提供独立 `GpuMeasurer`：只输出数值 `MeasureResult`，CPU 等价/容差/回退，
+    GPU 可用时候选窗口采样提升到 10–30fps；kernel 可替换不影响契约。
+- 批量视图合成：`render_many` 一次 context + 解码图片缓存，循环输出多个
+  网格/kind；这是 GL 提升 LLM 信息密度的主要用法。
 - VLM：远程服务，优化重点是减少图片/token 与并发批处理，不是本机 GPU。
 
 ### 5.5 缓存与单飞
@@ -331,6 +337,20 @@ Demucs/转写 → 静音/话题边界 → 抽帧 → 视觉 notes → Plan
 3. ✅ 模板/批量：`EditTemplate` 文件存储、apply-template 与批量编排 Job；
 4. ✅ 可选本地视觉：`vision_provider=local` 插件适配器，支持 ONNX 后端
    可用性检查，缺失时自动 text-only。
+
+### P4：语义层与 GL 定位（已完成）
+
+1. ✅ 证据路由与多视图：`vision.json routing`、标签不相交、一次抽帧、
+   ROI/二次复核按 measurements.score 选异常时刻；
+2. ✅ 测量事实与 `visual_facts` 注入 Planner；
+3. ✅ 屏幕文字 OCR：cv2 候选区 + 独立 worker + 逐帧内容缓存 + 章节/Planner；
+4. ✅ centroid+IoU 人脸跟踪/EMA 平滑，改善 9:16 裁切；
+5. ✅ RANSAC 仿射拆分相机/主体运动，识别 pan/tilt/zoom/B-roll；
+6. ✅ HSV 镜头聚类，章节只在视觉簇边界切分；
+7. ✅ 统一 fingerprint（dhash:v2，cv2 优先/Pillow fallback）；
+8. ✅ `render_many/synthesize_many` 批量视图合成；
+9. ✅ 独立 GpuMeasurer：CPU 等价/容差/回退与 10–30fps 采样入口；
+10. ✅ QOpenGLWidget 预览/叠层仅改善人审，明确不进入本轮实现。
 
 ---
 

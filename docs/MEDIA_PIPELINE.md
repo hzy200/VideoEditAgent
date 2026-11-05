@@ -163,6 +163,34 @@
 - 预览面板显示“代理预览/成片预览”；最终渲染完成后切换到成片。
 - 感知（质量/人脸/镜头）仍读取源素材，不使用代理，避免降低检测精度。
 
+## 感知与语义证据（P0–P2）
+
+- **证据路由**：`policies/vision.json` 的 `routing` 按目标关键词/人脸覆盖/
+  镜头率/转写密度选择主视图 + 最多 2 个补充视图；所有视图共享一次候选窗口与
+  原始帧抽帧，`roi_crop` 高分辨率与 `codec_residual` 允许单独抽帧。
+- **多视图标签**：每个视图顺序分配不相交的 `Txx` 区间；`evidence_refs` 白名单
+  取全部 TileMap 并集，跨视图同名标签不得复用。
+- **测量事实**：`d_hist/flow/dir/face/score/risk/cam/subj/motion` 只在测量存在时
+  进入 VLM 证据时间线；缺失值不补造，首帧 `d_hist=1.0` 占位值剔除。
+- **二次复核**：flagged 章节重新做 chapter-scoped 选择，换 kind（
+  `contact_sheet/bbox_overlay/codec_residual`）+ `roi_crop`；ROI 按
+  `measurements.score` 选最异常时刻，以时间回原素材取高分辨率。
+- **屏幕文字 OCR**：cv2 形态学梯度/轮廓候选区；OCR 只在 `ocr_worker.py`
+  进程内加载 rapidocr/pytesseract；逐帧缓存键 =
+  `source_hash + frame_sha256 + worker_version + policy_version`；
+  结果按时间注入章节 note/Planner，不写 IR。
+- **主体跟踪**：`face_tracking_enabled` 时 centroid+IoU 输出 `track_id`/出现区间，
+  并对同 track 锚点做 EMA 平滑；参数进入 faces 缓存键。
+- **运动拆分**：`flow_between` 用 RANSAC 仿射拆出 `camera_mag/subject_mag`，
+  分类 static/pan/tilt/zoom；只作测量事实。
+- **镜头聚类**：HSV 直方图相关性聚类，章节只在视觉簇边界切分；版本/阈值进入
+  chapters 缓存键。
+- **统一指纹**：dHash/直方图只来自 `perception/view/fingerprint.py`；
+  `dhash:v2` 与 engine 进入证据/质量/候选缓存键以及 evidence meta。
+- **批量渲染/测量**：`render_many/synthesize_many` 一次 context + 解码图片缓存；
+  独立 `GpuMeasurer` 只输出数值 `MeasureResult`，CPU 等价/容差/回退，
+  `measure_backend` 不参与 `render_hash`；GPU 可用时候选窗口采样可到 10–30fps。
+
 ## 校验
 
 - 每个成片最后一步是独立 ffprobe `verify`：时长、帧率、音轨、分辨率。

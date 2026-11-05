@@ -178,24 +178,18 @@ def select_analysis_frames(
 
 
 def dhash(path: Path) -> int | None:
-    """9x8 灰度差分哈希；缺少 Pillow 或读图失败时返回 None。"""
+    """统一指纹实现；缺少 Pillow/OpenCV 或读图失败时返回 None。"""
     try:
         from PIL import Image
+
+        from smartcut.perception.view import fingerprint
     except ImportError:  # pragma: no cover - vision 是 optional extra
         return None
     try:
         with Image.open(path) as image:
-            pixels = image.convert("L").resize(
-                (9, 8), Image.Resampling.LANCZOS
-            ).tobytes()
+            return fingerprint.dhash(image)
     except Exception:
         return None
-    value = 0
-    for row in range(8):
-        offset = row * 9
-        for column in range(8):
-            value = (value << 1) | int(pixels[offset + column] > pixels[offset + column + 1])
-    return value
 
 
 def _hamming(left: int, right: int) -> int:

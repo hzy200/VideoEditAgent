@@ -19,6 +19,8 @@ class FaceAnchor(BaseModel):
     w: float = Field(gt=0.0, le=1.0)
     h: float = Field(gt=0.0, le=1.0)
     confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    # 同一主体跨帧的稳定 id；旧缓存/未跟踪时为 None。
+    track_id: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def _inside_frame(self) -> "FaceAnchor":
@@ -35,6 +37,17 @@ class FaceAnchor(BaseModel):
         return min(1.0, max(0.0, self.y + self.h / 2))
 
 
+class FaceTrack(BaseModel):
+    """同一主体锚点的出现区间。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    track_id: int = Field(ge=0)
+    start: RationalTime
+    end: RationalTime
+    frame_count: int = Field(ge=1)
+
+
 class FaceReport(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -43,6 +56,8 @@ class FaceReport(BaseModel):
     frame_height: int = 0
     sampled_fps: float = 1.0
     anchors: list[FaceAnchor] = Field(default_factory=list)
+    tracks: list[FaceTrack] = Field(default_factory=list)
+    tracking_version: str = "iou@1.0"
     # thread / process / thread_fallback
     engine: str = "thread"
 

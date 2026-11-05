@@ -25,6 +25,7 @@ from smartcut.contracts.manifest import VideoManifest
 from smartcut.contracts.media import MediaFacts
 from smartcut.contracts.memory import VideoMemoryIndex
 from smartcut.contracts.review import EditReview, RenderReview
+from smartcut.contracts.screen_text import ScreenTextReport
 from smartcut.contracts.shots import ShotList
 from smartcut.contracts.templates import EditTemplate
 from smartcut.contracts.timeline import TimelineMemory
@@ -62,6 +63,7 @@ MODELS = {
     "overlay_asset": OverlayAssetRef,
     "overlay_spec": OverlaySpec,
     "render_review": RenderReview,
+    "screen_text_report": ScreenTextReport,
     "transition_spec": TransitionSpec,
     "watermark_removal": WatermarkRemovalSpec,
     "transcript": Transcript,

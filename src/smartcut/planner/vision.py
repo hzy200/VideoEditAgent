@@ -176,61 +176,176 @@ def chapters_needing_vision(
     return result
 
 
-def select_evidence_images(
-    workspace: Workspace,
-    evidence: dict | None,
-    settings: Settings,
-) -> list[VisionImage]:
-    """把已被 top-K 预算筛选过的证据视图编码为 VLM 图片。"""
-    payload = (evidence or {}).get("evidence") or {}
-    image_ref = str((evidence or {}).get("image_ref") or payload.get("image_ref") or "")
-    if not payload or not image_ref:
-        return []
+RISK_KINDS = {"black", "frozen", "blurry", "duplicate"}
+RISK_TOLERANCE_SECONDS = 0.5
+
+
+def _quality_marks(perception: dict | None) -> list[tuple[float, str]]:
+    marks = ((perception or {}).get("quality") or {}).get("marks") or []
+    result: list[tuple[float, str]] = []
+    for mark in marks:
+        kind = str(mark.get("kind") or "")
+        if kind not in RISK_KINDS:
+            continue
+        seconds = seconds_from_mapping(mark.get("t"))
+        if seconds is not None:
+            result.append((float(seconds), kind))
+    return result
+
+
+def _risk_at(
+    moment: float | None,
+    marks: list[tuple[float, str]],
+) -> str | None:
+    if moment is None or not marks:
+        return None
+    nearest = min(marks, key=lambda item: abs(item[0] - moment))
+    if abs(nearest[0] - moment) > RISK_TOLERANCE_SECONDS:
+        return None
+    return nearest[1]
+
+
+def _measurement_facts(measurement: dict) -> dict[str, Any]:
+    facts: dict[str, Any] = {}
+    d_hist = measurement.get("d_hist")
+    if d_hist is not None:
+        facts["d_hist"] = round(float(d_hist), 2)
+    flow_mag = measurement.get("flow_mag")
+    if flow_mag is not None:
+        facts["flow_mag"] = round(float(flow_mag), 2)
+    flow_dir = measurement.get("flow_dir_deg")
+    if flow_dir is not None:
+        facts["flow_dir_deg"] = round(float(flow_dir))
+    score = measurement.get("score")
+    if score is not None:
+        facts["score"] = round(float(score), 2)
+    camera_mag = measurement.get("camera_mag")
+    if camera_mag is not None:
+        facts["camera_mag"] = round(float(camera_mag), 2)
+    subject_mag = measurement.get("subject_mag")
+    if subject_mag is not None:
+        facts["subject_mag"] = round(float(subject_mag), 2)
+    camera_motion = measurement.get("camera_motion")
+    if camera_motion:
+        facts["camera_motion"] = str(camera_motion)
+    bbox = measurement.get("bbox_xywh")
+    width = float(measurement.get("width") or 0)
+    height = float(measurement.get("height") or 0)
+    if isinstance(bbox, (list, tuple)) and len(bbox) == 4 and width > 0 and height > 0:
+        area = float(bbox[2]) * float(bbox[3])
+        facts["face"] = round(min(1.0, area / (width * height)), 2)
+    return facts
+
+
+def _evidence_tile_metadata(
+    payload: dict,
+    quality_marks: list[tuple[float, str]] | None = None,
+) -> tuple[dict[str, Any], ...]:
     tiles = ((payload.get("tile_map") or {}).get("tiles")) or []
-    metadata = tuple(
-        {
+    measurements = payload.get("measurements") or []
+    marks = quality_marks or []
+    metadata: list[dict[str, Any]] = []
+    for index, tile in enumerate(tiles):
+        seconds = seconds_from_mapping(tile.get("t"))
+        entry: dict[str, Any] = {
             "label": str(tile.get("label") or ""),
-            "t_seconds": seconds_from_mapping(tile.get("t")),
+            "t_seconds": seconds,
             "pts": tile.get("pts"),
             "frame_no": tile.get("frame_no"),
         }
-        for tile in tiles
-    )
-    labels = [item["label"] for item in metadata if item["label"]]
-    label_text = (
-        f"（{labels[0]}–{labels[-1]}）" if len(labels) > 1 else f"（{labels[0]}）" if labels else ""
-    )
-    image = _encode_image(
-        workspace,
-        image_ref,
-        f"视觉证据视图{label_text}",
-        settings,
-    )
-    if image is None:
-        return []
-    image = VisionImage(
-        label=image.label,
-        mime=image.mime,
-        data_url=image.data_url,
-        sha256=image.sha256,
-        size=image.size,
-        evidence_id=str(payload.get("id") or ""),
-        tile_metadata=metadata,
-    )
-    seen = {image.sha256}
-    total = image.size
-    images = [image]
-    for extra in (evidence or {}).get("extra_images") or []:
-        if len(images) >= settings.vision_max_images:
-            break
-        item = _encode_image(workspace, str(extra), "证据补充视图", settings)
+        if index < len(measurements) and isinstance(measurements[index], dict):
+            facts = _measurement_facts(measurements[index])
+            # measure_tiles 把首帧 d_hist 置为 1.0 作为占位；不要当作真实变化。
+            if index == 0 and facts.get("d_hist") == 1.0:
+                facts.pop("d_hist", None)
+            entry.update(facts)
+        risk = _risk_at(
+            float(seconds) if seconds is not None else None,
+            marks,
+        )
+        if risk is not None:
+            entry["risk"] = risk
+        metadata.append(entry)
+    return tuple(metadata)
+
+
+def select_evidence_images(
+    workspace: Workspace,
+    evidence: dict | list[dict] | tuple[dict, ...] | None,
+    settings: Settings,
+    *,
+    perception: dict | None = None,
+) -> list[VisionImage]:
+    """把已被 top-K 预算筛选过的证据视图编码为 VLM 图片。
+
+    接受单个视图（旧调用）或视图列表。多视图必须由服务层预先分配不相交的
+    Txx 标签区间；这里只负责按全局图片/字节预算编码与去重。
+    """
+    if isinstance(evidence, (list, tuple)):
+        views = [item for item in evidence if isinstance(item, dict)]
+    else:
+        views = [evidence] if isinstance(evidence, dict) else []
+    quality_marks = _quality_marks(perception)
+    images: list[VisionImage] = []
+    seen: set[str] = set()
+    total = 0
+
+    def add(item: VisionImage | None) -> bool:
+        nonlocal total
         if item is None or item.sha256 in seen:
-            continue
+            return True
+        if len(images) >= settings.vision_max_images:
+            return False
         if total + item.size > settings.vision_total_max_bytes:
-            break
+            return False
         seen.add(item.sha256)
         total += item.size
         images.append(item)
+        return True
+
+    for view in views:
+        payload = view.get("evidence") or {}
+        image_ref = str(view.get("image_ref") or payload.get("image_ref") or "")
+        if not payload or not image_ref:
+            continue
+        kind = str(payload.get("kind") or view.get("kind") or "contact_sheet")
+        metadata = _evidence_tile_metadata(payload, quality_marks)
+        labels = [item["label"] for item in metadata if item["label"]]
+        label_text = (
+            f"（{labels[0]}–{labels[-1]}）"
+            if len(labels) > 1
+            else f"（{labels[0]}）" if labels else ""
+        )
+        encoded = _encode_image(
+            workspace,
+            image_ref,
+            f"视觉证据视图[{kind}]{label_text}",
+            settings,
+        )
+        if encoded is None:
+            continue
+        if not add(
+            VisionImage(
+                label=encoded.label,
+                mime=encoded.mime,
+                data_url=encoded.data_url,
+                sha256=encoded.sha256,
+                size=encoded.size,
+                evidence_id=str(payload.get("id") or ""),
+                tile_metadata=metadata,
+            )
+        ):
+            break
+        for extra in view.get("extra_images") or []:
+            if not add(
+                _encode_image(
+                    workspace,
+                    str(extra),
+                    f"视觉证据补充视图[{kind}]",
+                    settings,
+                )
+            ):
+                return images
     return images
 
 
@@ -302,17 +417,47 @@ IMAGE_NOTES_SYSTEM_PROMPT = """你是视频关键帧描述器。只输出一个 
 - cautions：最多 3 条画面风险（模糊、遮挡、无主体等）；
 - evidence_refs：仅当图片带 evidence_id/tiles 时输出，最多 5 个与描述最相关的
   Txx 标签；只能引用输入中真实存在的标签，引用不存在的标签视为错误。
-证据时间线给出 [Txx|秒] 与相邻语音文本，只用于理解画面与语音关系；
+证据时间线给出 [Txx|秒|测量...] 与相邻语音文本，只用于理解画面与语音关系。
+测量字段含义：d_hist=相邻帧直方图距离(0-1)，flow=光流强度，dir=光流方向角度，
+face=人脸框面积占比(0-1)，score=测量综合分(0-1)，risk=该时刻质量标记。
+cam/subj/motion 分别表示全局相机运动、残差主体运动和相机运动类型。
+这些是数值测量，不是语义结论；缺失字段表示未测量，不得臆造。flow/dir/cam/
+subj/motion 只在 temporal_diff/flow_strip 视图中出现，contact_sheet 没有运动
+测量时不得编造。
 不得输出时间算术、切点建议、文件路径、像素坐标或 ffmpeg 命令。
 输出必须符合以下 Schema：
 """
+
+
+def _tile_measurement_suffix(tile: dict[str, Any]) -> str:
+    """把测量值压成一行紧凑事实；缺失字段不输出，避免模型臆造。"""
+    parts: list[str] = []
+    if tile.get("d_hist") is not None:
+        parts.append(f"d_hist {float(tile['d_hist']):.2f}")
+    if tile.get("flow_mag") is not None:
+        parts.append(f"flow {float(tile['flow_mag']):.1f}")
+    if tile.get("flow_dir_deg") is not None:
+        parts.append(f"dir {float(tile['flow_dir_deg']):.0f}")
+    if tile.get("face") is not None:
+        parts.append(f"face {float(tile['face']):.2f}")
+    if tile.get("score") is not None:
+        parts.append(f"score {float(tile['score']):.2f}")
+    if tile.get("camera_mag") is not None:
+        parts.append(f"cam {float(tile['camera_mag']):.1f}")
+    if tile.get("subject_mag") is not None:
+        parts.append(f"subj {float(tile['subject_mag']):.1f}")
+    if tile.get("camera_motion"):
+        parts.append(f"motion {tile['camera_motion']}")
+    if tile.get("risk"):
+        parts.append(f"risk {tile['risk']}")
+    return "".join(f"|{part}" for part in parts)
 
 
 def _evidence_timeline(
     images: list[VisionImage],
     transcript: Any | None,
 ) -> str:
-    entries: list[tuple[str, float, str]] = []
+    entries: list[tuple[str, float, str, dict[str, Any]]] = []
     seen: set[str] = set()
     segments = list(getattr(transcript, "segments", []) or []) if transcript else []
     for image in images:
@@ -336,12 +481,13 @@ def _evidence_timeline(
                 )
                 if abs(nearest.start.to_float() - float(seconds)) <= 2.0:
                     text = nearest.text.strip()
-            entries.append((label, float(seconds), text))
+            entries.append((label, float(seconds), text, tile))
     entries.sort(key=lambda item: (item[1], item[0]))
     lines = []
-    for label, seconds, text in entries[:64]:
+    for label, seconds, text, tile in entries[:64]:
         speech = f"[语音] {text[:80]}" if text else "[无语音]"
-        lines.append(f"[{label}|{seconds:.3f}s] {speech}")
+        suffix = _tile_measurement_suffix(tile)
+        lines.append(f"[{label}|{seconds:.3f}s{suffix}] {speech}")
     return "\n".join(lines)
 
 
@@ -367,7 +513,16 @@ def build_image_note_messages(
                 "chapter_title": chapter.get("title"),
                 "label": image.label,
                 "evidence_id": image.evidence_id,
-                "tiles": list(image.tile_metadata),
+                # 测量值只在时间线里出现一次，避免 prompt 重复膨胀。
+                "tiles": [
+                    {
+                        "label": tile.get("label"),
+                        "t_seconds": tile.get("t_seconds"),
+                        "pts": tile.get("pts"),
+                        "frame_no": tile.get("frame_no"),
+                    }
+                    for tile in image.tile_metadata
+                ],
             }
         )
     timeline = _evidence_timeline(images, transcript)
