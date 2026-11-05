@@ -43,6 +43,7 @@ from smartcut.contracts.transcode import (
     AudioOutput,
     TranscodeProfile,
     TranscodeRequest,
+    default_audio_codec,
 )
 from smartcut.contracts.transcript import Transcript
 from smartcut.contracts.vision import (
@@ -157,6 +158,7 @@ class RenderMixin:
         "aac": "aac",
         "ac3": "ac3",
         "libopus": "opus",
+        "libmp3lame": "mp3",
         "flac": "flac",
         "pcm_s16le": "pcm_s16le",
         "pcm_s24le": "pcm_s24le",
@@ -166,6 +168,10 @@ class RenderMixin:
         "mp4": {"aac", "ac3", "opus"},
         "mov": {"aac", "ac3", "pcm_s16le", "pcm_s24le"},
         "mkv": None,
+        "m4a": {"aac", "ac3", "opus"},
+        "mp3": {"mp3"},
+        "wav": {"pcm_s16le", "pcm_s24le"},
+        "flac": {"flac"},
     }
 
     def create_proxy(self, project_id: str, height: int | None = None) -> dict:
@@ -881,14 +887,19 @@ class RenderMixin:
         if not source_facts.has_audio:
             return profile
         tracks = list(profile.audio_tracks)
+        fallback = (
+            default_audio_codec(profile.container)
+            if profile.media_type == "audio"
+            else "aac"
+        )
         if not tracks:
             codec = "copy"
             source_codec = (source_facts.audio.codec_name or "").lower()
             allowed = self._CONTAINER_AUDIO.get(profile.container)
             if allowed is not None and source_codec not in allowed:
-                codec = "aac"
+                codec = fallback
                 warnings.append(
-                    f"{profile.container} 不支持源音频 {source_codec or 'unknown'}，已转 AAC"
+                    f"{profile.container} 不支持源音频 {source_codec or 'unknown'}，已转 {fallback}"
                 )
             tracks = [AudioOutput(codec=codec)]
         else:
@@ -898,10 +909,10 @@ class RenderMixin:
                 if track.codec != "copy" or track.src is not None:
                     continue
                 if allowed is not None and source_codec not in allowed:
-                    tracks[index] = track.model_copy(update={"codec": "aac"})
+                    tracks[index] = track.model_copy(update={"codec": fallback})
                     warnings.append(
                         f"音轨 {index} 源编码 {source_codec or 'unknown'} 不兼容 "
-                        f"{profile.container}，已转 AAC"
+                        f"{profile.container}，已转 {fallback}"
                     )
         return profile.model_copy(update={"audio_tracks": tracks})
 
@@ -913,7 +924,8 @@ class RenderMixin:
     ) -> dict:
         """按输出 profile 转码/封装工作区内的媒体；与 EditIR 解耦。"""
         self._require_project(project_id)
-        asset = self._require_asset(project_id)
+        # 显式 src 允许处理项目音频资产/工作区文件；仅默认源才依赖主素材。
+        asset = self._require_asset(project_id) if request.src is None else None
         workspace = self.workspaces.get(project_id)
         cache = self._cache_for(project_id)
         cancel_token = getattr(reporter, "cancel_token", None)
@@ -926,6 +938,12 @@ class RenderMixin:
         source_hash = cache.source_hash(src_path)
 
         warnings: list[str] = []
+        if request.profile.media_type == "video" and source_facts.video is None:
+            raise ValueError(
+                "源文件没有视频轨；请选择音频容器并使用 media_type='audio'"
+            )
+        if request.profile.media_type == "audio" and not source_facts.has_audio:
+            raise ValueError("源文件没有音频轨，无法生成音频输出")
         profile = self._transcode_audio_fallback(profile=request.profile, source_facts=source_facts, warnings=warnings)
         if (
             source_facts.video is not None
@@ -1059,12 +1077,16 @@ class RenderMixin:
             "src": dst_rel,
             "expected_duration": source_facts.duration.model_dump(mode="json"),
             "expect_audio": bool(profile.audio_tracks) or source_facts.has_audio,
-            "expected_fps": profile.fps or source_facts.fps,
-            "check_av_sync": True,
+            "expected_fps": (
+                None
+                if profile.media_type == "audio"
+                else (profile.fps or source_facts.fps)
+            ),
+            "check_av_sync": profile.media_type == "video",
             "max_av_sync_seconds": 0.5,
             "tolerance_frames": 2,
         }
-        if source_facts.video is not None:
+        if source_facts.video is not None and profile.media_type == "video":
             verify_args["expected_width"] = (
                 profile.width or source_facts.video.width
             )
@@ -1082,11 +1104,15 @@ class RenderMixin:
         if source_facts.audio is not None:
             first_audio = profile.audio_tracks[0] if profile.audio_tracks else None
             if first_audio is None or first_audio.src is None:
-                verify_args["expected_audio_codec"] = (
-                    source_facts.audio.codec_name
-                    if first_audio is None or first_audio.codec == "copy"
-                    else self._AUDIO_CODEC_NAMES.get(first_audio.codec)
-                )
+                if first_audio is not None and first_audio.codec == "copy":
+                    expected_audio = source_facts.audio.codec_name
+                elif first_audio is not None:
+                    expected_audio = self._AUDIO_CODEC_NAMES.get(
+                        first_audio.codec
+                    )
+                else:
+                    expected_audio = default_audio_codec(profile.container)
+                verify_args["expected_audio_codec"] = expected_audio
         verify_result = self._execute_tool(
             executor,
             ToolCall(seq=1, tool="verify", args=verify_args),
@@ -1094,16 +1120,28 @@ class RenderMixin:
         if reporter is not None:
             reporter.record_tool(1, verify_result)
 
-        actual_encoder = (
-            source_facts.video.codec_name
-            if profile.video_codec == "copy" and source_facts.video is not None
-            else profile.video_codec
-        )
+        if profile.media_type == "audio":
+            first_audio = profile.audio_tracks[0] if profile.audio_tracks else None
+            actual_encoder = (
+                first_audio.codec
+                if first_audio is not None
+                else default_audio_codec(profile.container)
+            )
+        else:
+            actual_encoder = (
+                source_facts.video.codec_name
+                if profile.video_codec == "copy"
+                and source_facts.video is not None
+                else profile.video_codec
+            )
         payload = {
             "output_path": dst_rel,
             "output_abs": str(dst_path),
+            "media_type": profile.media_type,
             "container": profile.container,
-            "video_codec": profile.video_codec,
+            "video_codec": (
+                None if profile.media_type == "audio" else profile.video_codec
+            ),
             "actual_video_codec": actual.video.codec_name if actual.video else None,
             "audio_codec": verify_args.get("expected_audio_codec"),
             "width": actual.width,

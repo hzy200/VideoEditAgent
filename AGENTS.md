@@ -47,6 +47,10 @@ python -m pytest -q tests/test_audio_controls.py tests/test_captions.py tests/te
 
 # 多轨混音 / 音频资产 / Demucs 适配器
 python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/test_separation.py
+
+# 媒体修复 / 转换 / 音频容器 / 意图路由
+python -m pytest -q tests/test_media_ops_contracts.py tests/test_media_repair_tool.py tests/test_media_diagnostics.py tests/test_media_intent.py tests/test_media_tools_service.py tests/test_api_media.py
+QT_QPA_PLATFORM=offscreen python -m pytest -q tests/test_media_tools_gui.py tests/test_media_tools_panel.py tests/test_repair_dialog.py
 ```
 
 - Python 3.12（不使用 3.14，避开 OpenTimelineIO binding 问题）。
@@ -113,11 +117,10 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
 - 镜头聚类只允许在视觉簇边界处切章；聚类版本与阈值必须进入 chapters 缓存键。
 - dHash/直方图必须来自 `perception/view/fingerprint.py`；版本与 engine 必须进入
   证据/质量/候选缓存键，cv2 缺失时保留 Pillow fallback。
-- `render_many` 只做拼版/编号/bbox；一次 context + 解码图片缓存，禁止在
-  shader/渲染器内计算光流或直方图。
 - GpuMeasurer 必须与 renderer 解耦，只输出数值 MeasureResult；必须有 CPU 等价
   路径与容差比对，失败回退 CPU 并记录 `measure_backend`；该字段不得进入
-  `render_hash`。
+  `render_hash`。CUDA 实现未提供真实加速 kernel 前必须标记
+  `accelerated=False`，不得借此提升抽帧 fps。
 - 项目打开期间重复的 `open_project`/`proxy`/`audio_waveforms` 必须在
   `DesktopController` 单飞去重；主素材波形必须复用 `build_audio_waveforms`
   的结果，不得再并发调用 `build_waveform`。
@@ -191,6 +194,20 @@ python -m pytest -q tests/test_audio_tracks.py tests/test_audio_assets.py tests/
 - 混音预览必须防抖、按轨道参数与资产哈希缓存到 `proxy/mix_*`；
   预览失败不得影响最终渲染。
 - 音频 lane 波形必须按资产内容寻址缓存；不得按文件路径冒充缓存。
+- 媒体修复/转换只产出新文件到 `exports/` 或 `repairs/`，源文件只读，不得写 IR；
+  修复缓存键必须含 source_hash、`media_repair_v1` 与规范化请求，失败不得缓存。
+- 损坏文件可经 `import_raw_media` 复制进 `media/`，但不得注册为项目素材、
+  不得 probe；该入口只服务诊断/修复，不替换 `ingest`。
+- 修复必须走 `media_repair` 工具：重封装、CFR 重编码、音画同步、轻度锐化；
+  重封装失败只能回退一次完整重编码，并在结果中记录 `used_strategy` 与 warning。
+- 音频-only 转码必须用 `TranscodeProfile.media_type="audio"`，容器限
+  mp3/m4a/wav/flac；视频 profile 不得使用音频容器，反之亦然。
+- 自然语言媒体意图必须规则优先；LLM 只允许输出 `MediaGoalDraft` 的枚举/数值，
+  不得输出路径、URL、shell 或 ffmpeg 参数；失败必须回退规则，不得静默执行。
+- AI 媒体意图必须作用于当前选中的 workspace 源（`src`）；不得在用户选择
+  其他源时静默改回项目主素材。`/media/operation` 一键工作流使用 Job `media_ops`。
+- 媒体工具长任务必须走 Job（`media_repair`/`transcode`），GUI 只经
+  `DesktopController`；后台回调不得弹模态框。
 - 工具审计必须批量写（当前 20 条/批），任务结束/失败/取消时 flush。
 - 时间线编辑只在 GUI 本地 segment 列表中进行；不得在 QWidget 内调用 Services。
 - 所有编辑操作必须走 Undo/Redo 快照；保存为 revision 前不得写后端。

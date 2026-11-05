@@ -17,6 +17,7 @@ from smartcut.cancel import CancellationToken
 from smartcut.config import Settings
 from smartcut.contracts.edit_ir import EditIR
 from smartcut.contracts.effects import Effect
+from smartcut.contracts.media_ops import RepairRequest
 from smartcut.contracts.transcode import TranscodeRequest
 from smartcut.desktop.workers import Task
 from smartcut.logging import get_logger
@@ -54,6 +55,9 @@ class DesktopController(QObject):
     render_reviewed = Signal(object)
     preference_changed = Signal(object)
     evidence_changed = Signal(object)
+    media_diagnosis = Signal(object)
+    media_plan_ready = Signal(object)
+    media_source_imported = Signal(object)
     operation_done = Signal(str, object)
     error = Signal(str)
 
@@ -295,6 +299,15 @@ class DesktopController(QObject):
                     result["project_id"],
                     result.get("run_id"),
                 )
+        elif op == "media_diagnose":
+            if result.get("project_id") == current:
+                self.media_diagnosis.emit(result.get("diagnosis") or {})
+        elif op == "media_interpret":
+            if result.get("project_id") == current:
+                self.media_plan_ready.emit(result.get("plan"))
+        elif op == "media_import":
+            if result.get("project_id") == current:
+                self.media_source_imported.emit(result)
         elif op == "diagnostics":
             self.diagnostics_changed.emit(result)
         elif op == "rename_project":
@@ -746,6 +759,61 @@ class DesktopController(QObject):
             lambda reporter: self.services.transcode(pid, request, reporter),
         )
 
+    def import_media_for_tools(self, path: str) -> None:
+        pid = self._require_project()
+        if not pid:
+            return
+
+        def call() -> dict:
+            result = self.services.import_raw_media(pid, path)
+            result["project_id"] = pid
+            return result
+
+        self._run("media_import", call)
+
+    def diagnose_media(self, src: str | None = None) -> None:
+        pid = self._require_project()
+        if not pid:
+            return
+        def call() -> dict:
+            diagnosis = self.services.diagnose_media(pid, src)
+            return {
+                "project_id": pid,
+                "diagnosis": diagnosis.model_dump(mode="json"),
+            }
+
+        self._run("media_diagnose", call)
+
+    def interpret_media_goal(
+        self, goal: str, src: str | None = None
+    ) -> None:
+        pid = self._require_project()
+        if not pid:
+            return
+
+        def call() -> dict:
+            plan = self.services.interpret_media_goal(pid, goal, src=src)
+            return {
+                "project_id": pid,
+                "plan": (
+                    plan.model_dump(mode="json") if plan is not None else None
+                ),
+            }
+
+        self._run("media_interpret", call)
+
+    def repair_media(self, request: RepairRequest) -> None:
+        pid = self._require_project()
+        if not pid:
+            return
+        self._submit_job(
+            "media_repair",
+            pid,
+            lambda reporter: self.services.repair_media(
+                pid, request, reporter
+            ),
+        )
+
     def review_render(self, project_id: str, revision_no: int) -> None:
         def load() -> dict:
             return {
@@ -984,6 +1052,18 @@ class DesktopController(QObject):
                     if job["status"] == "succeeded" and is_current:
                         self.operation_done.emit(
                             "transcode", job.get("result") or {}
+                        )
+                elif kind == "media_repair":
+                    self.refresh_artifacts(project_id)
+                    if job["status"] == "succeeded" and is_current:
+                        self.operation_done.emit(
+                            "media_repair", job.get("result") or {}
+                        )
+                elif kind == "media_ops":
+                    self.refresh_artifacts(project_id)
+                    if job["status"] == "succeeded" and is_current:
+                        self.operation_done.emit(
+                            "media_ops", job.get("result") or {}
                         )
                 elif kind == "separate":
                     if job["status"] == "succeeded":

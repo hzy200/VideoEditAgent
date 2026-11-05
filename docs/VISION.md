@@ -184,14 +184,17 @@ Planner 上下文单独注入该段，默认限制前 40 章；只含数值/标�
 
 - `EvidenceRenderer.render_many(measure, requests)`：同一 measure 一次 context、
   共享解码图片缓存，循环输出多个网格/kind 的 `view.png`；CPU/GL 均实现，
-  `ViewSynthesizer.synthesize_many` 逐请求生成独立 evidence/哈希。
+  `ViewSynthesizer.synthesize_many` 逐请求生成独立 evidence/哈希。该入口只
+  适用于同一 `MeasureResult` 的多请求；`build_visual_evidence_set` 的每种
+  kind 有独立测量结果，仍逐视图 `render()`，共享的是候选窗口与抽帧。
 - GL 仍只做拼版/编号/bbox；**不**在 shader 中计算光流、帧差或直方图。
 - `perception/view/measure_gpu.py` 的 GpuMeasurer 与 renderer 解耦，只输出
   数值 `MeasureResult`；CPU 参考路径为 `measure_tiles`，CPU/GPU 用
   `compare_measure_results` 做数值容差比对；失败回退 CPU 并记录
   `measure_backend`（不参与 `render_hash`）。
-- `SMARTCUT_GPU_MEASURE_ENABLED` 开启且后端非 CPU 时，候选窗口采样可提升到
-  `SMARTCUT_GPU_MEASURE_FPS`（≤30fps）；CPU 保持 `SMARTCUT_VIEW_FPS`。
+- 只有 `accelerated=True` 的测量后端才可把候选窗口采样提升到
+  `SMARTCUT_GPU_MEASURE_FPS`（≤30fps）；CPU 与 `CudaViewMeasurerPlaceholder`
+  保持 `SMARTCUT_VIEW_FPS`。
 - `QOpenGLWidget` 预览/叠层仅改善人审，优先级最低，不进入本轮实现。
 
 ## 可选本地视觉后端

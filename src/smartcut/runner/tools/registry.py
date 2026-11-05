@@ -13,6 +13,7 @@ from smartcut.runner.tools import (
     frames,
     loudnorm,
     loudnorm_measure,
+    media_repair,
     mix_audio,
     postprocess,
     probe,
@@ -91,6 +92,13 @@ TOOLS: dict[str, ToolDef] = {
         args_model=transcode.TranscodeArgs,
         build_argv=transcode.build_argv,
         prepare=transcode.prepare,
+        timeout_attr="render_timeout_seconds",
+    ),
+    "media_repair": ToolDef(
+        name="media_repair",
+        args_model=media_repair.MediaRepairArgs,
+        build_argv=media_repair.build_argv,
+        prepare=media_repair.prepare,
         timeout_attr="render_timeout_seconds",
     ),
     "loudnorm_measure": ToolDef(

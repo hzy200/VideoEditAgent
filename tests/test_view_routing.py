@@ -543,3 +543,54 @@ def test_evidence_set_shares_extraction_and_caches(
         services.close()
         jobs.shutdown(wait=True)
         db.dispose()
+
+
+def test_evidence_key_includes_routing_policy_version(
+    settings: Settings,
+    synthetic_video: Path,
+) -> None:
+    """路由策略版本变化必须让证据缓存键失效。"""
+    settings = settings.model_copy(
+        update={"vision_use_evidence": True, "view_evidence_enabled": True}
+    )
+    db = Database(settings.db_path)
+    db.init()
+    jobs = JobService(db, 1)
+    services = Services(settings, db, jobs, transcriber=NullTranscriber())
+    try:
+        project_id = services.create_project("evidence-key-route")["id"]
+        services.ingest(project_id, str(synthetic_video))
+        services.extract_frames(project_id)
+        prepared = services._prepare_evidence(project_id, None)
+        kwargs = dict(
+            tile_index=None,
+            roi_target_time=None,
+            label_start=1,
+            dedupe=True,
+            fps=prepared.fps,
+            backend=prepared.backend_hint,
+        )
+        assert services._routing_policy_version() == "route@1.0"
+        before = services._evidence_key(
+            prepared.ctx,
+            "contact_sheet",
+            None,
+            prepared.selection,
+            **kwargs,
+        )
+
+        # load_policy 是 lru_cache，必须复制后再改，避免污染其他测试。
+        services.policy = services.policy.model_copy(deep=True)
+        services.policy.vision.routing.version = "route@test"
+        after = services._evidence_key(
+            prepared.ctx,
+            "contact_sheet",
+            None,
+            prepared.selection,
+            **kwargs,
+        )
+        assert before != after
+    finally:
+        services.close()
+        jobs.shutdown(wait=True)
+        db.dispose()

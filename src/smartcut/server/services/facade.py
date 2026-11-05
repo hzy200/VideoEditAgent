@@ -152,6 +152,7 @@ def _safe_filename(name: str) -> str:
 
 from smartcut.server.services.base import ServiceBase
 from smartcut.server.services.evidence import EvidenceMixin
+from smartcut.server.services.media_tools import MediaToolsMixin
 from smartcut.server.services.orchestration import OrchestrationMixin
 from smartcut.server.services.perception import PerceptionMixin
 from smartcut.server.services.rendering import RenderMixin
@@ -163,6 +164,7 @@ class Services(
     EvidenceMixin,
     VisualMixin,
     RenderMixin,
+    MediaToolsMixin,
     ScreenTextMixin,
     PerceptionMixin,
     OrchestrationMixin,

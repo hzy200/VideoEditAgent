@@ -18,6 +18,7 @@ from smartcut.planner.vision import VisionImage, build_image_note_messages
 from smartcut.server.db import Database
 from smartcut.server.jobs import JobService
 from smartcut.server.services import Services
+from smartcut.server.services.visual import VisualMixin
 
 
 def _rt(seconds: str) -> RationalTime:
@@ -200,3 +201,35 @@ def test_visual_notes_reject_unknown_evidence_label(
         services.close()
         jobs.shutdown(wait=True)
         db.dispose()
+
+
+def test_multiview_evidence_refs_use_union_and_reject_duplicates() -> None:
+    """多视图白名单取并集；跨视图同名标签必须拒绝，避免引用歧义。"""
+    validator = VisualMixin()
+
+    def view(*labels: str) -> dict:
+        return {
+            "evidence": {
+                "tile_map": {"tiles": [{"label": label} for label in labels]}
+            }
+        }
+
+    views = [view("T01", "T02"), view("T03", "T04")]
+    validator._validate_evidence_refs(
+        None,
+        [ImageVisualNote(image_index=0, evidence_refs=["T01", "T04"])],
+        views=views,
+    )
+    with pytest.raises(ValueError, match="不存在的证据标签"):
+        validator._validate_evidence_refs(
+            None,
+            [ImageVisualNote(image_index=0, evidence_refs=["T09"])],
+            views=views,
+        )
+    duplicates = [view("T01"), view("T01")]
+    with pytest.raises(ValueError, match="跨视图重复"):
+        validator._validate_evidence_refs(
+            None,
+            [ImageVisualNote(image_index=0, evidence_refs=["T01"])],
+            views=duplicates,
+        )

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict
 
-from smartcut.contracts.transcode import TranscodeProfile
+from smartcut.contracts.transcode import TranscodeProfile, default_audio_codec
 from smartcut.runner.tools.base import ToolContext
 
 
@@ -25,7 +25,7 @@ def _at_least_even(value: int) -> int:
     return value if value % 2 == 0 else value + 1
 
 
-def _video_filter(profile: TranscodeProfile) -> str | None:
+def video_filter(profile: TranscodeProfile) -> str | None:
     filters: list[str] = []
     if profile.hdr_tonemap:
         filters.extend(
@@ -58,7 +58,7 @@ def _video_filter(profile: TranscodeProfile) -> str | None:
     return ",".join(filters)
 
 
-def _video_codec_args(profile: TranscodeProfile) -> list[str]:
+def video_codec_args(profile: TranscodeProfile) -> list[str]:
     codec = profile.video_codec
     if codec == "copy":
         return ["-c:v", "copy"]
@@ -104,12 +104,14 @@ def _video_codec_args(profile: TranscodeProfile) -> list[str]:
     return args
 
 
-def _audio_codec_args(
+def audio_codec_args(
     profile: TranscodeProfile,
     loudnorm: str | None,
 ) -> list[str]:
     tracks = profile.audio_tracks
     if not tracks:
+        if profile.media_type == "audio":
+            return ["-c:a", default_audio_codec(profile.container)]
         return ["-c:a", "copy"]
 
     args: list[str] = []
@@ -130,7 +132,7 @@ def _audio_codec_args(
     return args
 
 
-def _measured_loudnorm(
+def measured_loudnorm_filter(
     profile: TranscodeProfile,
     measured: dict[str, str] | None,
 ) -> str | None:
@@ -159,6 +161,55 @@ def _measured_loudnorm(
             parts.append(f"{key}={value}")
     parts.append("linear=true")
     return "loudnorm=" + ":".join(parts)
+
+
+def _map_audio_tracks(
+    argv: list[str],
+    profile: TranscodeProfile,
+    audio_input_index: dict[int, int],
+) -> None:
+    if profile.audio_tracks:
+        for index, track in enumerate(profile.audio_tracks):
+            if track.src is None:
+                argv.extend(["-map", f"0:a:{track.stream_index}?"])
+            else:
+                source = audio_input_index[index]
+                argv.extend(["-map", f"{source}:a:{track.stream_index}?"])
+    else:
+        argv.extend(["-map", "0:a:0?"])
+
+
+def audio_track_metadata(profile: TranscodeProfile) -> list[str]:
+    args: list[str] = []
+    for index, track in enumerate(profile.audio_tracks):
+        if track.language:
+            args.extend([f"-metadata:s:a:{index}", f"language={track.language}"])
+        if track.title:
+            args.extend([f"-metadata:s:a:{index}", f"title={track.title}"])
+    return args
+
+
+def common_metadata(profile: TranscodeProfile) -> list[str]:
+    metadata = profile.metadata
+    args: list[str] = ["-map_metadata", "0", "-map_chapters", "0"]
+    for key in ("title", "artist", "album", "comment", "language"):
+        value = getattr(metadata, key)
+        if value:
+            args.extend(["-metadata", f"{key}={value}"])
+    for key, value in metadata.extra.items():
+        args.extend(["-metadata", f"{key}={value}"])
+    return args
+
+
+def container_flags(profile: TranscodeProfile) -> list[str]:
+    if profile.container not in {"mp4", "mov"}:
+        return []
+    flags: list[str] = []
+    if profile.faststart:
+        flags.append("faststart")
+    if profile.metadata.extra:
+        flags.append("use_metadata_tags")
+    return ["-movflags", "+" + "+".join(flags)] if flags else []
 
 
 def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
@@ -192,18 +243,20 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
             argv.extend(["-i", str(ctx.workspace.resolve_input(track.src))])
             input_count += 1
 
+    if profile.media_type == "audio":
+        argv.append("-vn")
+        _map_audio_tracks(argv, profile, audio_input_index)
+        argv.append("-sn")
+        loudnorm = measured_loudnorm_filter(profile, args.loudnorm_measured)
+        argv.extend(audio_codec_args(profile, loudnorm))
+        argv.extend(audio_track_metadata(profile))
+        argv.extend(common_metadata(profile))
+        argv.append(str(dst))
+        return argv
+
     # 视频始终只取第一条视频流；转码不是多源时间线。
     argv.extend(["-map", "0:v:0"])
-
-    if profile.audio_tracks:
-        for index, track in enumerate(profile.audio_tracks):
-            if track.src is None:
-                argv.extend(["-map", f"0:a:{track.stream_index}?"])
-            else:
-                source = audio_input_index[index]
-                argv.extend(["-map", f"{source}:a:{track.stream_index}?"])
-    else:
-        argv.extend(["-map", "0:a:0?"])
+    _map_audio_tracks(argv, profile, audio_input_index)
 
     for index, track in enumerate(profile.subtitle_tracks):
         if track.src is None:
@@ -214,11 +267,11 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
     if not profile.subtitle_tracks:
         argv.append("-sn")
 
-    video_filter = _video_filter(profile)
-    if video_filter:
-        argv.extend(["-vf", video_filter])
+    video_filter_chain = video_filter(profile)
+    if video_filter_chain:
+        argv.extend(["-vf", video_filter_chain])
     if profile.video_codec != "copy":
-        argv.extend(_video_codec_args(profile))
+        argv.extend(video_codec_args(profile))
         pix_fmt = profile.effective_pix_fmt()
         if pix_fmt:
             argv.extend(["-pix_fmt", pix_fmt])
@@ -229,13 +282,9 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
     else:
         argv.extend(["-c:v", "copy"])
 
-    loudnorm = _measured_loudnorm(profile, args.loudnorm_measured)
-    argv.extend(_audio_codec_args(profile, loudnorm))
-    for index, track in enumerate(profile.audio_tracks):
-        if track.language:
-            argv.extend([f"-metadata:s:a:{index}", f"language={track.language}"])
-        if track.title:
-            argv.extend([f"-metadata:s:a:{index}", f"title={track.title}"])
+    loudnorm = measured_loudnorm_filter(profile, args.loudnorm_measured)
+    argv.extend(audio_codec_args(profile, loudnorm))
+    argv.extend(audio_track_metadata(profile))
 
     for index, track in enumerate(profile.subtitle_tracks):
         if track.codec != "copy":
@@ -245,23 +294,8 @@ def build_argv(args: BaseModel, ctx: ToolContext) -> list[str]:
         if track.title:
             argv.extend([f"-metadata:s:s:{index}", f"title={track.title}"])
 
-    metadata = profile.metadata
-    argv.extend(["-map_metadata", "0", "-map_chapters", "0"])
-    for key in ("title", "artist", "album", "comment", "language"):
-        value = getattr(metadata, key)
-        if value:
-            argv.extend(["-metadata", f"{key}={value}"])
-    for key, value in metadata.extra.items():
-        argv.extend(["-metadata", f"{key}={value}"])
-
-    if profile.container in {"mp4", "mov"}:
-        flags: list[str] = []
-        if profile.faststart:
-            flags.append("faststart")
-        if metadata.extra:
-            flags.append("use_metadata_tags")
-        if flags:
-            argv.extend(["-movflags", "+" + "+".join(flags)])
+    argv.extend(common_metadata(profile))
+    argv.extend(container_flags(profile))
     argv.append(str(dst))
     return argv
 

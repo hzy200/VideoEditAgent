@@ -12,6 +12,7 @@ from smartcut.perception.transcribe import NullTranscriber
 from smartcut.perception.view.measure import TileInput, measure_tiles
 from smartcut.perception.view.measure_gpu import (
     CpuViewMeasurer,
+    CudaViewMeasurerPlaceholder,
     build_view_measurer,
     compare_measure_results,
     effective_measure_fps,
@@ -139,8 +140,19 @@ def test_effective_fps_uses_gpu_only_when_available() -> None:
 
     class _GpuProbe:
         backend = "cuda"
+        accelerated = True
 
     assert effective_measure_fps(settings, _GpuProbe()) == 12.0
+
+    class _PlaceholderProbe:
+        backend = "cuda-placeholder"
+        implementation = "cuda-placeholder"
+        accelerated = False
+
+    # 占位实现只能增加抽帧，不能提升采样率。
+    assert effective_measure_fps(settings, _PlaceholderProbe()) == 2.0
+    assert CudaViewMeasurerPlaceholder.accelerated is False
+    assert CudaViewMeasurerPlaceholder.backend == "cuda-placeholder"
     disabled = settings.model_copy(update={"gpu_measure_enabled": False})
     assert effective_measure_fps(disabled, _GpuProbe()) == 2.0
     assert build_view_measurer(disabled).backend == "cpu"

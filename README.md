@@ -130,12 +130,14 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
   避免同一页 PPT/录屏被内部切点拆成多章。
 - **统一基础指纹（P1）**：dHash/直方图收口到 `perception/view/fingerprint.py`，
   `dhash:v2` 与 engine 进入证据/质量/候选缓存键与 evidence meta。
-- **批量证据渲染（P2）**：`render_many/synthesize_many` 一次渲染调用输出多个
-  网格/kind，复用同一 context 与解码图片缓存，每个产物独立内容寻址。
+- **批量渲染 API（P2）**：`render_many/synthesize_many` 对同一 `MeasureResult`
+  的多个请求复用 context 与解码图片缓存；多视图证据每种 kind 独立测量，不走
+  该入口，共享的是候选窗口与抽帧。
 - **独立 GpuMeasurer（P2）**：与 renderer 解耦，只输出数值 `MeasureResult`；
   CPU 等价路径 + 数值容差比对 + 失败回退，`measure_backend` 不参与
-  `render_hash`；GPU 可用时候选窗口采样可提升到 10–30fps（当前 OpenCV
-  CUDA 绑定有限，默认 CPU；kernel 可替换而不改变契约）。
+  `render_hash`；仅真正加速的后端可把采样提升到 10–30fps（当前 OpenCV CUDA
+  绑定有限，CUDA 为 `accelerated=False` 的占位实现，默认 CPU；kernel 可替换
+  而不改变契约）。
 - **反馈闭环**：保存 revision 时把被删除片段写入 `segment_reject`，偏好统计
   排除被拒标签；「我的偏好」面板显示样本数/中位片段/保留率/top tags 与
   「按我的节奏规划」开关。
@@ -159,9 +161,14 @@ faster-whisper 本地模型、SQLite、项目工作区、Orchestrator。也可�
 - **内嵌资源**：ffmpeg/ffprobe、base whisper 模型、OpenCV Haar 数据随 exe 分发。
 - **数据与密钥**：数据写 `%LOCALAPPDATA%\SmartCut`；API Key 存 Windows Credential Manager。
 - **版本与手工精修**：revision 列表、片段起止编辑、dry-run、渲染、产物。
-- **独立导出/转码**：不进入 EditIR 的 `TranscodeService`，支持 mp4/mov/mkv、
-  H.264/HEVC/AV1/ProRes、码率/分辨率/帧率/像素格式、多音轨、软字幕、元数据；
-  API 与桌面“导出 / 转码…”均可调用。
+- **独立导出/转码**：不进入 EditIR 的 `TranscodeService`，支持 mp4/mov/mkv
+  以及音频容器 mp3/m4a/wav/flac，H.264/HEVC/AV1/ProRes、码率/分辨率/帧率/
+  像素格式、多音轨、软字幕、元数据；API 与桌面“导出 / 转码…”均可调用。
+- **媒体修复与压缩**：诊断后做重封装、CFR 重编码修时间戳/卡顿、音画起始同步、
+  轻度锐化；GUI“包装 → 媒体工具”提供导入/诊断/修复/转换/压缩按钮，可先复制
+  无法 probe 的损坏文件再修复；AI 对话框可对当前选中源用提示词触发（含
+  `POST /media/operation` 一键工作流）；所有产物写入 `exports/` 或
+  `repairs/`，源文件只读。
 - **输入规范化**：渲染默认 CFR、10bit 降级提示、可选 HDR tonemap；
   独立转码支持 autorotate/keep_10bit/tonemap。
 - **音频/字幕增强**：BGM sidechain ducking、两遍 loudnorm、ASS/fontsdir、软字幕封装。

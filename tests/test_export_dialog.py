@@ -45,3 +45,57 @@ def test_export_dialog_copy_mode_forces_passthrough(qapp) -> None:
     dialog.height.setValue(720)
     with pytest.raises(ValueError):
         dialog.request()
+
+
+def test_export_dialog_audio_only_container(qapp) -> None:
+    dialog = ExportDialog(render_rel=None)
+    dialog.container.setCurrentIndex(dialog.container.findData("mp3"))
+    request = dialog.request()
+    assert request.profile.media_type == "audio"
+    assert request.profile.container == "mp3"
+    assert request.profile.video_codec == "copy"
+    assert request.profile.audio_tracks[0].codec == "libmp3lame"
+
+
+def test_export_dialog_compression_preset(qapp) -> None:
+    dialog = ExportDialog(render_rel=None)
+    dialog.compression.setCurrentIndex(
+        dialog.compression.findData(32)
+    )
+    assert dialog.crf.value() == 32
+    request = dialog.request()
+    assert request.profile.crf == 32
+
+
+def test_export_dialog_audio_asset_source(qapp) -> None:
+    dialog = ExportDialog(
+        render_rel=None,
+        audio_assets=[{"path": "audio/tone.wav", "name": "tone"}],
+    )
+    dialog.source.setCurrentIndex(
+        dialog.source.findData("audio/tone.wav")
+    )
+    request = dialog.request()
+    assert request.src == "audio/tone.wav"
+
+
+def test_export_dialog_selected_raw_source(qapp) -> None:
+    dialog = ExportDialog(
+        render_rel=None,
+        source="media/raw_broken.mp4",
+    )
+    assert dialog.source.currentData() == "media/raw_broken.mp4"
+    request = dialog.request()
+    assert request.src == "media/raw_broken.mp4"
+
+
+def test_export_dialog_audio_compression_preset(qapp) -> None:
+    dialog = ExportDialog(render_rel=None)
+    dialog.container.setCurrentIndex(dialog.container.findData("mp3"))
+    dialog.compression.setCurrentIndex(
+        dialog.compression.findText("小体积")
+    )
+    assert dialog.audio_bitrate.text() == "96k"
+    request = dialog.request()
+    assert request.profile.media_type == "audio"
+    assert request.profile.audio_tracks[0].bitrate == "96k"

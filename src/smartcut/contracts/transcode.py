@@ -13,12 +13,33 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from smartcut.contracts.time import fps_from_string
 
-Container = Literal["mp4", "mov", "mkv"]
+Container = Literal["mp4", "mov", "mkv", "mp3", "m4a", "wav", "flac"]
+MediaType = Literal["video", "audio"]
 VideoCodec = Literal["copy", "libx264", "libx265", "libsvtav1", "prores_ks"]
-AudioCodec = Literal["copy", "aac", "ac3", "libopus", "flac", "pcm_s16le", "pcm_s24le"]
+AudioCodec = Literal[
+    "copy",
+    "aac",
+    "ac3",
+    "libopus",
+    "libmp3lame",
+    "flac",
+    "pcm_s16le",
+    "pcm_s24le",
+]
 SubtitleCodec = Literal["copy", "mov_text", "srt", "ass", "webvtt"]
 ScaleMode = Literal["fit", "stretch", "crop"]
 FpsMode = Literal["cfr", "vfr", "passthrough"]
+
+AUDIO_CONTAINERS = frozenset({"mp3", "m4a", "wav", "flac"})
+DEFAULT_AUDIO_CODEC: dict[str, AudioCodec] = {
+    "mp4": "aac",
+    "mov": "aac",
+    "mkv": "aac",
+    "m4a": "aac",
+    "mp3": "libmp3lame",
+    "wav": "pcm_s16le",
+    "flac": "flac",
+}
 
 _CONTAINER_VIDEO: dict[str, set[str]] = {
     "mp4": {"copy", "libx264", "libx265", "libsvtav1"},
@@ -29,11 +50,19 @@ _CONTAINER_AUDIO: dict[str, set[str]] = {
     "mp4": {"copy", "aac", "ac3", "libopus"},
     "mov": {"copy", "aac", "ac3", "pcm_s16le", "pcm_s24le"},
     "mkv": {"copy", "aac", "ac3", "libopus", "flac", "pcm_s16le", "pcm_s24le"},
+    "m4a": {"copy", "aac", "ac3", "libopus"},
+    "mp3": {"copy", "libmp3lame"},
+    "wav": {"copy", "pcm_s16le", "pcm_s24le"},
+    "flac": {"copy", "flac"},
 }
 _CONTAINER_SUBTITLE: dict[str, set[str]] = {
     "mp4": {"copy", "mov_text"},
     "mov": {"copy", "mov_text"},
     "mkv": {"copy", "mov_text", "srt", "ass", "webvtt"},
+    "m4a": set(),
+    "mp3": set(),
+    "wav": set(),
+    "flac": set(),
 }
 _RATE = re.compile(r"^\d+(?:\.\d+)?[kKmM]?$")
 
@@ -89,6 +118,7 @@ class TranscodeProfile(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    media_type: MediaType = "video"
     container: Container = "mp4"
     video_codec: VideoCodec = "libx264"
     preset: str = Field(default="medium", min_length=1, max_length=32)
@@ -131,6 +161,28 @@ class TranscodeProfile(BaseModel):
     @model_validator(mode="after")
     def _consistent(self) -> "TranscodeProfile":
         container = self.container
+        if self.media_type == "audio":
+            if container not in AUDIO_CONTAINERS:
+                raise ValueError(
+                    f"音频输出不支持容器 {container}，请使用 {sorted(AUDIO_CONTAINERS)}"
+                )
+            if self.subtitle_tracks:
+                raise ValueError("音频输出不能包含字幕轨")
+            if self.width or self.height or self.fps:
+                raise ValueError("音频输出不能缩放或修改帧率")
+            if self.hdr_tonemap or self.keep_10bit:
+                raise ValueError("音频输出不支持 HDR/10bit 选项")
+            for track in self.audio_tracks:
+                if track.codec not in _CONTAINER_AUDIO[container]:
+                    raise ValueError(
+                        f"{container} 不支持音频编码 {track.codec}"
+                    )
+            return self
+
+        if container in AUDIO_CONTAINERS:
+            raise ValueError(
+                f"视频输出不能使用音频容器 {container}；请设置 media_type='audio'"
+            )
         if self.video_codec not in _CONTAINER_VIDEO[container]:
             raise ValueError(
                 f"{container} 不支持视频编码 {self.video_codec}"
@@ -200,11 +252,23 @@ class TranscodeRequest(BaseModel):
         return self
 
 
+def container_extension(container: Container) -> str:
+    """容器与输出扩展名一致（m4a/mp3/wav/flac 也直接使用容器名）。"""
+    return container
+
+
+def default_audio_codec(container: Container) -> AudioCodec:
+    return DEFAULT_AUDIO_CODEC[container]
+
+
 __all__ = [
+    "AUDIO_CONTAINERS",
     "AudioCodec",
     "AudioOutput",
     "Container",
+    "DEFAULT_AUDIO_CODEC",
     "FpsMode",
+    "MediaType",
     "MetadataOptions",
     "ScaleMode",
     "SubtitleCodec",
@@ -212,4 +276,6 @@ __all__ = [
     "TranscodeProfile",
     "TranscodeRequest",
     "VideoCodec",
+    "container_extension",
+    "default_audio_codec",
 ]

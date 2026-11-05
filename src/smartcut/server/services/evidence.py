@@ -723,6 +723,13 @@ class EvidenceMixin:
         except Exception:
             return None
 
+    def _routing_policy_version(self) -> str:
+        """视图路由策略版本；路由变化必须产生新的证据缓存键。"""
+        policy = getattr(self, "policy", None)
+        routing = getattr(getattr(policy, "vision", None), "routing", None)
+        version = getattr(routing, "version", None)
+        return str(version) if version else "unrouted"
+
     def _evidence_key(
         self,
         ctx: _EvidenceContext,
@@ -744,7 +751,7 @@ class EvidenceMixin:
         )
         return ctx.cache.key(
             ctx.source_hash,
-            "evidence_v5",
+            "evidence_v6",
             kind,
             tile_index,
             (
@@ -758,6 +765,7 @@ class EvidenceMixin:
             fingerprint.engine(),
             backend,
             self.settings.view_policy_version,
+            self._routing_policy_version(),
             ctx.frames_key,
             transcript_sig,
             sorted(chapter_ids or []),
@@ -766,6 +774,9 @@ class EvidenceMixin:
             self.settings.gpu_measure_enabled,
             self.settings.gpu_measure_tolerance,
             getattr(getattr(self, "view_measurer", None), "backend", "cpu"),
+            getattr(
+                getattr(self, "view_measurer", None), "implementation", "cpu"
+            ),
             self.settings.view_max_images,
             self.settings.view_max_windows,
             self.settings.view_window_padding_seconds,

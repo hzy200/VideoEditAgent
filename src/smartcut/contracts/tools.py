@@ -25,6 +25,7 @@ ToolName = Literal[
     "postprocess",
     "mix_audio",
     "transcode",
+    "media_repair",
     "loudnorm_measure",
 ]
 

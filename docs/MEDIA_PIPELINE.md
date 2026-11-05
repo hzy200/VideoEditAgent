@@ -62,6 +62,29 @@
 - 输出写入项目 `exports/`；缓存键 = 源哈希 + profile + 外挂字幕/音频哈希，命中直接复制。
 - 两遍 loudnorm：先 `loudnorm_measure` 输出 JSON，再把 measured_* 注入第二遍。
 - 渲染管线同样支持单音轨两遍 loudnorm（`render_loudnorm_two_pass`）。
+- 音频-only：`TranscodeProfile.media_type="audio"`，容器 `mp3/m4a/wav/flac`，
+  工具输出 `-vn -map 0:a:0`；显式 `src` 可不依赖项目主素材。
+
+## 媒体修复（P1）
+
+- `contracts/media_ops.py` 定义 `MediaDiagnosis`、`RepairRequest` 与
+  `MediaGoalDraft`；`MediaGoalDraft` 不含 src/dst/路径/命令字段。
+- `runner/tools/media_repair.py` 只生成 argv：错误容忍输入、remux、CFR 重编码、
+  `adelay`/`atrim` + `aresample` 音画同步、`unsharp` 轻度锐化。
+- `Services.import_raw_media` 可把本地文件直接复制进 `media/` 但不注册素材，
+  用于处理 `ingest` 阶段就 probe 失败的损坏文件；GUI 媒体工具面板提供
+  “导入文件…”。
+- `Services.diagnose_media` 基于 ffprobe 与已有质量缓存识别 `unopenable`、
+  `av_desync`、`vfr_timestamps`、`blurry/frozen`；`repair_media` 优先按诊断结果
+  选策略，remux 失败回退一次 reencode，产物写 `repairs/` 并按源哈希缓存。
+- 音画同步使用有界 `apad=whole_dur=<源时长>` + `-shortest`，避免无限补静音。
+- 自然语言入口：`server/services/media_intent.py` 规则优先，
+  `Services.interpret_media_goal(..., src=...)` 可作用于当前选择的源文件
+  （含 `import_raw_media` 导入的损坏文件）；可选 LLM 补全；GUI AI 面板确认后执行。
+- `POST /media/interpret` 只返回计划；`POST /media/operation` 是 AI 一键工作流
+  （解析 → 诊断/修复/转换 → 校验），Job kind 为 `media_ops`。
+- 压缩：视频用 CRF 预设；音频-only 用码率预设（平衡 128k / 小体积 96k）。
+- 限制：不做内容级还原；锐化只改善观感；静止/冻结画面只告警。
 
 ## 输入规范化
 
@@ -187,9 +210,11 @@
   chapters 缓存键。
 - **统一指纹**：dHash/直方图只来自 `perception/view/fingerprint.py`；
   `dhash:v2` 与 engine 进入证据/质量/候选缓存键以及 evidence meta。
-- **批量渲染/测量**：`render_many/synthesize_many` 一次 context + 解码图片缓存；
-  独立 `GpuMeasurer` 只输出数值 `MeasureResult`，CPU 等价/容差/回退，
-  `measure_backend` 不参与 `render_hash`；GPU 可用时候选窗口采样可到 10–30fps。
+- **批量渲染/测量**：`render_many/synthesize_many` 一次 context + 解码图片缓存，
+  但只适用于同一 `MeasureResult` 的多请求；多视图证据每种 kind 独立测量，仍逐
+  视图渲染。独立 `GpuMeasurer` 只输出数值 `MeasureResult`，CPU 等价/容差/回退，
+  `measure_backend` 不参与 `render_hash`；仅 `accelerated=True` 的后端可把候选
+  窗口采样提升到 10–30fps。
 
 ## 校验
 

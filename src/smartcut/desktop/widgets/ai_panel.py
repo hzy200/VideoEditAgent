@@ -25,6 +25,7 @@ from smartcut.desktop.presets import SCENE_PRESETS
 
 class AIPanel(QWidget):
     run_requested = Signal(str, bool, bool)
+    media_goal_requested = Signal(str)
     cancel_requested = Signal()
     review_requested = Signal()
 
@@ -89,9 +90,15 @@ class AIPanel(QWidget):
         self.cancel_button.setEnabled(False)
         self.review_button = QPushButton("审片当前成片")
         self.review_button.setMinimumHeight(34)
+        self.media_button = QPushButton("AI 修复/转换")
+        self.media_button.setMinimumHeight(34)
+        self.media_button.setToolTip(
+            "用当前提示词识别媒体修复或格式转换意图；执行前会弹出确认对话框"
+        )
         action_row.addWidget(self.run_button, 1)
         action_row.addWidget(self.cancel_button)
         action_row.addWidget(self.review_button)
+        action_row.addWidget(self.media_button)
         layout.addLayout(action_row)
 
         self.progress = QProgressBar()
@@ -116,6 +123,7 @@ class AIPanel(QWidget):
 
         self.preset_button.clicked.connect(self._apply_preset)
         self.run_button.clicked.connect(self._emit_run)
+        self.media_button.clicked.connect(self._emit_media)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
         self.review_button.clicked.connect(self.review_requested.emit)
         self.set_project_enabled(False)
@@ -140,9 +148,11 @@ class AIPanel(QWidget):
 
     def set_project_enabled(self, enabled: bool) -> None:
         self.run_button.setEnabled(enabled)
+        self.media_button.setEnabled(enabled)
 
     def set_running(self, running: bool) -> None:
         self.run_button.setEnabled(not running)
+        self.media_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
         self.progress.setValue(0 if running else self.progress.value())
         if running:
@@ -208,6 +218,9 @@ class AIPanel(QWidget):
         self.outline_first.setChecked(preset.phase == "outline")
         self.fast_outline.setChecked(preset.phase == "fast_outline")
         self.audio_first.setChecked(preset.phase == "audio_first")
+
+    def _emit_media(self) -> None:
+        self.media_goal_requested.emit(self.goal_text())
 
     def _emit_run(self) -> None:
         extras: list[str] = []

@@ -23,6 +23,12 @@ from smartcut.contracts.encoder import EncoderProfile
 from smartcut.contracts.patch import EditPatch
 from smartcut.contracts.manifest import VideoManifest
 from smartcut.contracts.media import MediaFacts
+from smartcut.contracts.media_ops import (
+    MediaDiagnosis,
+    MediaGoalDraft,
+    MediaOperationPlan,
+    RepairRequest,
+)
 from smartcut.contracts.memory import VideoMemoryIndex
 from smartcut.contracts.review import EditReview, RenderReview
 from smartcut.contracts.screen_text import ScreenTextReport
@@ -58,8 +64,12 @@ MODELS = {
     "edit_template": EditTemplate,
     "encoder_profile": EncoderProfile,
     "image_visual_notes": ImageVisualNotes,
+    "media_diagnosis": MediaDiagnosis,
     "media_facts": MediaFacts,
+    "media_goal_draft": MediaGoalDraft,
+    "media_operation_plan": MediaOperationPlan,
     "outline_approval": OutlineApproval,
+    "repair_request": RepairRequest,
     "overlay_asset": OverlayAssetRef,
     "overlay_spec": OverlaySpec,
     "render_review": RenderReview,

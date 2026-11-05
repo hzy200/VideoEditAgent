@@ -53,6 +53,7 @@ from smartcut.desktop.widgets.effects_panel import EffectsPanel
 from smartcut.desktop.widgets.evidence_panel import EvidencePanel
 from smartcut.desktop.widgets.export_dialog import ExportDialog
 from smartcut.desktop.widgets.inspector_panel import InspectorPanel
+from smartcut.desktop.widgets.media_tools_panel import MediaToolsPanel
 from smartcut.desktop.widgets.metrics_panel import MetricsPanel
 from smartcut.desktop.widgets.outline_panel import OutlinePanel
 from smartcut.desktop.widgets.perception_panel import PerceptionPanel
@@ -60,6 +61,7 @@ from smartcut.desktop.widgets.preference_panel import PreferencePanel
 from smartcut.desktop.widgets.preview_panel import PreviewPanel
 from smartcut.desktop.widgets.project_panel import ProjectPanel
 from smartcut.desktop.widgets.queue_panel import QueuePanel
+from smartcut.desktop.widgets.repair_dialog import RepairDialog
 from smartcut.desktop.widgets.runs_panel import RunsPanel
 from smartcut.desktop.widgets.settings_dialog import SettingsDialog
 from smartcut.desktop.widgets.subtitle_panel import SubtitlePanel
@@ -184,6 +186,8 @@ class MainWindow(QMainWindow):
         self.audio_panel = AudioPanel()
         self.effects_panel = EffectsPanel()
         self.timing_panel = TimingPanel()
+        self.media_tools_panel = MediaToolsPanel()
+        self._audio_assets_for_tools: list[dict] = []
         self.outline_panel = OutlinePanel()
         self.perception_panel = PerceptionPanel()
         self.candidate_panel = CandidatePanel()
@@ -218,6 +222,7 @@ class MainWindow(QMainWindow):
                 (self.audio_panel, "音频"),
                 (self.effects_panel, "特效"),
                 (self.timing_panel, "转场/变速/水印"),
+                (self.media_tools_panel, "媒体工具"),
             ],
         )
         self._add_workspace(
@@ -297,6 +302,13 @@ class MainWindow(QMainWindow):
             icon(QStyle.StandardPixmap.SP_DialogApplyButton), "渲染"
         )
         self.toolbar_render_action.triggered.connect(self._on_toolbar_render)
+        toolbar.addSeparator()
+        media_action = toolbar.addAction(
+            icon(QStyle.StandardPixmap.SP_BrowserReload), "媒体工具"
+        )
+        media_action.triggered.connect(
+            lambda: self._show_panel(self.media_tools_panel)
+        )
         self.preview_panel.playing_changed.connect(self._on_playing_changed)
 
     def _on_playing_changed(self, playing: bool) -> None:
@@ -332,10 +344,20 @@ class MainWindow(QMainWindow):
         file_menu.addAction(upload_action)
 
         file_menu.addSeparator()
-        export_action = QAction("导出 / 转码…", self)
+        export_action = QAction("导出 / 转码 / 压缩…", self)
         export_action.setShortcut("Ctrl+E")
         export_action.triggered.connect(self._on_export)
         file_menu.addAction(export_action)
+
+        repair_action = QAction("媒体修复…", self)
+        repair_action.triggered.connect(lambda: self._on_media_repair())
+        file_menu.addAction(repair_action)
+
+        media_tools_action = QAction("媒体工具面板", self)
+        media_tools_action.triggered.connect(
+            lambda: self._show_panel(self.media_tools_panel)
+        )
+        file_menu.addAction(media_tools_action)
 
         file_menu.addSeparator()
         settings_action = QAction("设置", self)
@@ -377,8 +399,19 @@ class MainWindow(QMainWindow):
         self.project_panel.delete_project.connect(self._on_delete_project)
 
         self.ai_panel.run_requested.connect(self._on_orchestrate)
+        self.ai_panel.media_goal_requested.connect(self._on_ai_media_goal)
         self.ai_panel.cancel_requested.connect(self._on_cancel_jobs)
         self.ai_panel.review_requested.connect(self._on_review_render)
+        self.media_tools_panel.import_requested.connect(
+            self._on_media_import_source
+        )
+        self.media_tools_panel.diagnose_requested.connect(
+            self._on_media_diagnose
+        )
+        self.media_tools_panel.repair_requested.connect(self._on_media_repair)
+        self.media_tools_panel.convert_requested.connect(
+            self._on_media_convert
+        )
         self.outline_panel.approve_requested.connect(self._on_outline_approve)
         self.outline_panel.refresh_requested.connect(self._on_outline_refresh)
         self.outline_panel.seek_requested.connect(self.preview_panel.seek)
@@ -450,6 +483,11 @@ class MainWindow(QMainWindow):
         self.controller.jobs_changed.connect(self.queue_panel.set_jobs)
         self.controller.diagnostics_changed.connect(self.diagnostics_panel.set_diagnostics)
         self.controller.audio_assets_changed.connect(self._on_audio_assets_changed)
+        self.controller.media_diagnosis.connect(self._on_media_diagnosis)
+        self.controller.media_plan_ready.connect(self._on_media_plan_ready)
+        self.controller.media_source_imported.connect(
+            self._on_media_source_imported
+        )
         self.controller.audio_waveforms_changed.connect(
             self.timeline_panel.set_audio_waveforms
         )
@@ -543,6 +581,7 @@ class MainWindow(QMainWindow):
             self.timeline_panel.clear()
             self.preview_panel.clear()
             self.ai_panel.set_project_enabled(False)
+            self.media_tools_panel.set_project_enabled(False)
             self.project_panel.set_project_enabled(False)
             self.subtitle_panel.set_cues([], burn=False)
             self.audio_panel.set_audio(None)
@@ -813,6 +852,8 @@ class MainWindow(QMainWindow):
             self.current_ir = None
 
         self.current_project = project
+        self.media_tools_panel.set_project_enabled(project.get("asset") is not None)
+        self.media_tools_panel.set_render_rel(None)
         self._overlay_assets = list(project.get("overlay_assets") or [])
         self.timing_panel.set_overlay_assets(self._overlay_assets)
         workspace_dir = project.get("workspace_dir")
@@ -892,6 +933,7 @@ class MainWindow(QMainWindow):
             "removals": deepcopy(ir.get("removals") or []),
         }
         self._sync_timing_panel()
+        self.media_tools_panel.set_render_rel(self._current_render_rel())
         self.subtitle_panel.set_cues(
             [],
             burn=bool((ir.get("export") or {}).get("burn_captions")),
@@ -1078,22 +1120,29 @@ class MainWindow(QMainWindow):
         self.progress.setValue(1)
         self._set_status(f"正在渲染 revision {revision_no}…")
 
+    def _current_render_rel(self) -> str | None:
+        revision = self.inspector_panel.current_revision()
+        if revision is None or self.current_project is None:
+            return None
+        candidate = (
+            Path(self.current_project["workspace_dir"])
+            / "renders"
+            / f"r{revision}"
+            / "output.mp4"
+        )
+        if candidate.is_file():
+            return f"renders/r{revision}/output.mp4"
+        return None
+
     def _on_export(self) -> None:
         if self.current_project is None:
             QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
             return
-        revision = self.inspector_panel.current_revision()
-        render_rel: str | None = None
-        if revision is not None:
-            candidate = (
-                Path(self.current_project["workspace_dir"])
-                / "renders"
-                / f"r{revision}"
-                / "output.mp4"
-            )
-            if candidate.is_file():
-                render_rel = f"renders/r{revision}/output.mp4"
-        dialog = ExportDialog(render_rel=render_rel, parent=self)
+        dialog = ExportDialog(
+            render_rel=self._current_render_rel(),
+            audio_assets=self._audio_assets_for_tools,
+            parent=self,
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             try:
                 request = dialog.request()
@@ -1102,6 +1151,119 @@ class MainWindow(QMainWindow):
                 return
             self.controller.transcode(request)
             self._set_status("正在提交转码任务…")
+
+    def _on_media_import_source(self) -> None:
+        if self.current_project is None:
+            QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "导入媒体文件（允许无法打开的文件）",
+            "",
+            "媒体文件 (*.mp4 *.mov *.mkv *.avi *.mp3 *.m4a *.wav *.flac);;所有文件 (*)",
+        )
+        if not path:
+            return
+        self._set_status("正在复制文件到项目工作区…")
+        self.controller.import_media_for_tools(path)
+
+    def _on_media_source_imported(self, result: dict) -> None:
+        src = (result or {}).get("src")
+        if not src:
+            return
+        self.media_tools_panel.add_source(
+            src, (result or {}).get("name")
+        )
+        self._set_status(f"已导入媒体文件：{src}")
+
+    def _on_media_diagnose(self) -> None:
+        if self.current_project is None:
+            QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
+            return
+        source = self.media_tools_panel.selected_source()
+        self.media_tools_panel.set_running(True)
+        self._set_status("正在诊断媒体结构…")
+        self.controller.diagnose_media(source)
+
+    def _on_media_repair(self, plan: dict | None = None) -> None:
+        if self.current_project is None:
+            QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
+            return
+        dialog = RepairDialog(
+            src=self.media_tools_panel.selected_source(), parent=self
+        )
+        if plan:
+            dialog.apply_plan(plan)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            request = dialog.request()
+        except ValueError as exc:
+            QMessageBox.warning(self, "修复参数错误", str(exc))
+            return
+        self.media_tools_panel.set_running(True)
+        self._set_status("正在提交修复任务…")
+        self.controller.repair_media(request)
+
+    def _on_media_convert(self, plan: dict | None = None) -> None:
+        if self.current_project is None:
+            QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
+            return
+        dialog = ExportDialog(
+            render_rel=self._current_render_rel(),
+            audio_assets=self._audio_assets_for_tools,
+            source=self.media_tools_panel.selected_source(),
+            parent=self,
+        )
+        if plan:
+            dialog.apply_plan(plan)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            request = dialog.request()
+        except ValueError as exc:
+            QMessageBox.warning(self, "转换参数错误", str(exc))
+            return
+        self.media_tools_panel.set_running(True)
+        self._set_status("正在提交转换/压缩任务…")
+        self.controller.transcode(request)
+
+    def _on_ai_media_goal(self, goal: str) -> None:
+        if self.current_project is None:
+            QMessageBox.information(self, "SmartCut", "请先创建或选择项目。")
+            return
+        if not goal.strip():
+            QMessageBox.information(
+                self, "SmartCut", "请先输入修复或转换目标。"
+            )
+            return
+        self.media_tools_panel.set_running(True)
+        self._set_status("正在解析媒体修复/转换意图…")
+        self.controller.interpret_media_goal(
+            goal, self.media_tools_panel.selected_source()
+        )
+
+    def _on_media_diagnosis(self, diagnosis: dict) -> None:
+        self.media_tools_panel.set_running(False)
+        self.media_tools_panel.show_diagnosis(diagnosis or {})
+
+    def _on_media_plan_ready(self, plan: dict | None) -> None:
+        self.media_tools_panel.set_running(False)
+        if not plan:
+            self._set_status("未识别为媒体修复/转换意图")
+            return
+        operation = plan.get("operation")
+        self.media_tools_panel.result.setPlainText(
+            f"AI 计划：{operation}\n原因：{plan.get('reason') or '-'}"
+        )
+        if operation == "repair":
+            self._on_media_repair(plan)
+        elif operation in {"convert", "compress"}:
+            self._on_media_convert(plan)
+        elif operation == "diagnose":
+            self._on_media_diagnose()
+        else:
+            self._set_status(f"未支持的媒体操作: {operation}")
 
     # ── Orchestrator ──────────────────────────────────────────────────
     def _on_orchestrate(
@@ -1226,6 +1388,8 @@ class MainWindow(QMainWindow):
         kind = job.get("kind", "task")
         if kind == "orchestrate":
             self.ai_panel.set_progress(job)
+        elif kind in {"media_repair", "media_ops", "transcode"}:
+            self.media_tools_panel.set_progress(job)
         self.progress.setValue(int(job.get("progress") or 0))
         self._set_status(
             f"{kind} · {job.get('status')} · {job.get('message') or ''}"
@@ -1239,6 +1403,8 @@ class MainWindow(QMainWindow):
         if job.get("status") == "failed":
             if kind == "orchestrate":
                 self.ai_panel.set_running(False)
+            if kind in {"media_repair", "media_ops", "transcode"}:
+                self.media_tools_panel.set_running(False)
             self.progress.setValue(0)
             self._on_error(job.get("error") or f"{kind} 失败")
             return
@@ -1253,6 +1419,10 @@ class MainWindow(QMainWindow):
                 self.preview_panel.load_media(output, "成片预览")
                 self._set_status(f"渲染完成: {result.get('output_path')}")
             self.controller.refresh_artifacts()
+            self.media_tools_panel.set_render_rel(self._current_render_rel())
+        elif kind in {"media_repair", "media_ops", "transcode"}:
+            self.media_tools_panel.set_running(False)
+            self.media_tools_panel.show_result(job.get("result") or {})
         elif kind == "transcribe":
             result = job.get("result") or {}
             state = "（降级）" if result.get("degraded") else ""
@@ -1393,6 +1563,8 @@ class MainWindow(QMainWindow):
         self._schedule_preview_mix()
 
     def _on_audio_assets_changed(self, assets: list[dict]) -> None:
+        self._audio_assets_for_tools = list(assets)
+        self.media_tools_panel.set_audio_assets(assets)
         self.audio_panel.set_assets(assets)
         if self.current_project is not None:
             self.audio_panel.set_context(
@@ -1708,6 +1880,9 @@ class MainWindow(QMainWindow):
         elif op == "transcribe" and isinstance(result, dict):
             state = "（降级）" if result.get("degraded") else ""
             self._set_status(f"转写完成{state}")
+        elif op in {"transcode", "media_repair", "media_ops"} and isinstance(result, dict):
+            self.media_tools_panel.set_running(False)
+            self.media_tools_panel.show_result(result)
         elif op == "separation" and isinstance(result, dict):
             stems = result.get("stems") or []
             self._set_status(
@@ -1904,6 +2079,7 @@ class MainWindow(QMainWindow):
         """后台任务错误只做非阻塞提示；离屏环境绝不弹模态框。"""
         text = str(message or "未知错误")
         _LOG.error("desktop_error", error=text)
+        self.media_tools_panel.set_running(False)
         self._set_status(f"错误：{text}")
         self.status_label.setStyleSheet("color: #e5484d;")
         self.status_label.setToolTip(text)

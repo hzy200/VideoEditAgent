@@ -28,6 +28,7 @@ _SCALED_TOOLS = {
     "mix_audio": 1.0,
     "proxy": 2.0,
     "transcode": 3.0,
+    "media_repair": 3.0,
     "loudnorm_measure": 0.5,
 }
 

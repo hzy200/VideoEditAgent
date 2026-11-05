@@ -6,12 +6,13 @@ import asyncio
 import json
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from smartcut.contracts.edit_ir import EditIR
 from smartcut.contracts.effects import Effect
+from smartcut.contracts.media_ops import RepairRequest
 from smartcut.contracts.patch import EditPatch
 from smartcut.contracts.templates import EditTemplate
 from smartcut.contracts.transcode import TranscodeRequest
@@ -44,6 +45,26 @@ class SeparateRequest(BaseModel):
 class OverlayImportRequest(BaseModel):
     src: str = Field(min_length=1, description="本地图片路径（会复制进 workspace）")
     name: str | None = Field(default=None, max_length=200)
+
+
+class DiagnoseMediaRequest(BaseModel):
+    src: str | None = Field(default=None, description="工作区相对路径；None=项目主素材")
+
+
+class MediaGoalRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=2000)
+    src: str | None = Field(
+        default=None, description="工作区相对路径；None=项目主素材/首个音频资产"
+    )
+    use_llm: bool = True
+
+
+class MediaOperationRequest(MediaGoalRequest):
+    pass
+
+
+class RawMediaImportRequest(BaseModel):
+    src: str = Field(min_length=1, description="本地文件路径；只复制，不 probe")
 
 
 class PlanRequest(BaseModel):
@@ -347,11 +368,94 @@ def transcode(
 ) -> dict:
     """独立转码/封装：不进入 EditIR，也不改变项目时间线。"""
     services.get_project(project_id)
-    services.get_media_facts(project_id)
     job_id = services.jobs.submit(
         project_id,
         "transcode",
         lambda reporter: services.transcode(project_id, payload, reporter),
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.post("/projects/{project_id}/media/diagnose")
+def diagnose_media(
+    project_id: str,
+    payload: DiagnoseMediaRequest | None = None,
+    services: Services = Depends(get_services),
+) -> dict:
+    """同步诊断媒体结构问题；不抽帧、不改源文件。"""
+    services.get_project(project_id)
+    diagnosis = services.diagnose_media(
+        project_id, payload.src if payload is not None else None
+    )
+    return diagnosis.model_dump(mode="json")
+
+
+@router.post("/projects/{project_id}/media/import")
+def import_raw_media(
+    project_id: str,
+    payload: RawMediaImportRequest,
+    services: Services = Depends(get_services),
+) -> dict:
+    """复制任意本地文件进工作区，供损坏文件诊断/修复使用。"""
+    services.get_project(project_id)
+    return services.import_raw_media(project_id, payload.src)
+
+
+@router.post("/projects/{project_id}/media/repair", status_code=202)
+def repair_media(
+    project_id: str,
+    payload: RepairRequest,
+    services: Services = Depends(get_services),
+) -> dict:
+    """提交简单修复任务；产物写入 repairs/，源文件只读。"""
+    services.get_project(project_id)
+    job_id = services.jobs.submit(
+        project_id,
+        "media_repair",
+        lambda reporter: services.repair_media(project_id, payload, reporter),
+    )
+    return {"job_id": job_id, "status": "queued"}
+
+
+@router.post("/projects/{project_id}/media/interpret")
+def interpret_media_goal(
+    project_id: str,
+    payload: MediaGoalRequest,
+    services: Services = Depends(get_services),
+) -> dict:
+    """把自然语言提示解析为修复/转换计划；未识别时返回 422。"""
+    services.get_project(project_id)
+    plan = services.interpret_media_goal(
+        project_id,
+        payload.goal,
+        src=payload.src,
+        use_llm=payload.use_llm,
+    )
+    if plan is None:
+        raise HTTPException(
+            status_code=422,
+            detail="未识别为媒体修复/转换意图",
+        )
+    return plan.model_dump(mode="json")
+
+
+@router.post("/projects/{project_id}/media/operation", status_code=202)
+def media_operation(
+    project_id: str,
+    payload: MediaOperationRequest,
+    services: Services = Depends(get_services),
+) -> dict:
+    """AI 一键媒体工作流：解析意图 → 诊断/修复/转换 → 校验。"""
+    services.get_project(project_id)
+    job_id = services.jobs.submit(
+        project_id,
+        "media_ops",
+        lambda reporter: services.run_media_operation(
+            project_id,
+            payload.goal,
+            reporter,
+            src=payload.src,
+        ),
     )
     return {"job_id": job_id, "status": "queued"}
 

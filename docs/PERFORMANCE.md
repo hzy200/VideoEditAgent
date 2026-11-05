@@ -230,15 +230,18 @@ python scripts/benchmark_evidence_render.py --tiles 9 --repeat 3 \
 
 - `render_many(measure, requests)`：同一 measure 一次 context、共享解码图片缓存，
   循环输出多个网格/kind；`synthesize_many` 逐请求生成独立 evidence/hash。
+  该入口不用于多视图证据：`build_visual_evidence_set` 每种 kind 有独立
+  `MeasureResult`，共享的是抽帧而非渲染上下文。
   GL 仍只做拼版/编号/bbox，不在 shader 计算光流/帧差/直方图。
 - `perception/view/measure_gpu.py` 的 GpuMeasurer 与 renderer 解耦：
   - CPU 参考路径 `measure_tiles`；
   - CPU/GPU 用 `compare_measure_results` 做数值容差比对；
   - GPU 失败回退 CPU，记录 `measure_backend`（不参与 render_hash）；
-  - `SMARTCUT_GPU_MEASURE_ENABLED` 且后端非 CPU 时，候选窗口采样可提升到
-    `SMARTCUT_GPU_MEASURE_FPS`（≤30fps），CPU 保持 `view_fps`。
-- 当前 OpenCV Python CUDA 绑定有限，`CudaViewMeasurer` 先做能力探测并使用
-  CPU 数值参考；未来替换 kernel 不改变 `MeasureResult` 契约。
+  - 只有 `accelerated=True` 的测量后端才可把候选窗口采样提升到
+    `SMARTCUT_GPU_MEASURE_FPS`（≤30fps）；CPU 与占位实现保持 `view_fps`。
+- 当前 OpenCV Python CUDA 绑定有限，`CudaViewMeasurerPlaceholder` 只做能力
+  探测并使用 CPU 数值参考，标记 `accelerated=False`，不会提升采样帧率；
+  未来替换真正 kernel 不改变 `MeasureResult` 契约。
 
 ## 12. 任务队列、项目生命周期与原子写
 

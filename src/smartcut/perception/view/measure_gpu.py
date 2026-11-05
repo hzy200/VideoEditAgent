@@ -1,7 +1,7 @@
 """独立测量器：只输出数值 MeasureResult，与 renderer 解耦。
 
 GPU 后端必须与 CPU 参考路径数值等价；失败/不可用必须回退 CPU 并显式记录。
-GPU 的真正价值是允许候选窗口用更高 fps 采样（见 effective_measure_fps）。
+只有真正加速的实现才允许提高候选窗口采样 fps（见 effective_measure_fps）。
 """
 
 from __future__ import annotations
@@ -10,11 +10,16 @@ from typing import Any, Protocol
 
 from smartcut.contracts.visual_evidence import MeasureResult
 from smartcut.errors import RunCancelledError
+from smartcut.logging import get_logger
 from smartcut.perception.view.measure import measure_tiles
+
+logger = get_logger("smartcut.perception.view")
 
 
 class ViewMeasurer(Protocol):
     backend: str
+    implementation: str
+    accelerated: bool
 
     def measure(self, tiles: list[Any], **kwargs: Any) -> MeasureResult: ...
 
@@ -25,20 +30,26 @@ class ViewMeasurementUnavailable(RuntimeError):
 
 class CpuViewMeasurer:
     backend = "cpu"
+    implementation = "cpu"
+    accelerated = False
 
     def measure(self, tiles: list[Any], **kwargs: Any) -> MeasureResult:
         return measure_tiles(tiles, **kwargs)
 
 
-class CudaViewMeasurer:
-    """可选 CUDA 后端。
+class CudaViewMeasurerPlaceholder:
+    """CUDA 占位实现：只做能力探测，测量仍走 CPU 参考路径。
 
-    当前 OpenCV Python 的 CUDA 直方图/缩放绑定不稳定，因此数值契约复用
-    ``measure_tiles`` 作为 CPU 等价参考；该类负责能力探测与后端标记。
-    真正的 GPU kernel 可在保持 MeasureResult 契约的前提下替换内部实现。
+    当前 OpenCV Python 的 CUDA 直方图/缩放绑定不稳定，因此这里不提供任何
+    GPU 加速，``accelerated=False``。``effective_measure_fps`` 只认
+    ``accelerated``，该占位实现不会把采样率提升到 10–30fps，避免开启后
+    抽帧量暴增却没有性能收益。真正的 GPU kernel 应另建实现并显式设置
+    ``accelerated=True``，同时保持 MeasureResult 契约。
     """
 
-    backend = "cuda"
+    backend = "cuda-placeholder"
+    implementation = "cuda-placeholder"
+    accelerated = False
 
     def __init__(self) -> None:
         try:
@@ -59,7 +70,7 @@ class CudaViewMeasurer:
             ) from exc
 
     def measure(self, tiles: list[Any], **kwargs: Any) -> MeasureResult:
-        # 数值契约与 CPU 完全一致；backend 由调用方记录，不参与 render_hash。
+        # 数值契约与 CPU 完全一致；不参与 render_hash。
         return measure_tiles(tiles, **kwargs)
 
 
@@ -70,17 +81,25 @@ def build_view_measurer(settings) -> ViewMeasurer:
     if backend in {"cpu", "off", "false", "0"}:
         return CpuViewMeasurer()
     try:
-        return CudaViewMeasurer()
+        measurer = CudaViewMeasurerPlaceholder()
     except ViewMeasurementUnavailable:
         return CpuViewMeasurer()
+    logger.warning(
+        "cuda_measure_placeholder",
+        detail="CUDA 测量当前为占位实现，使用 CPU 数值参考且不提升采样 fps",
+    )
+    return measurer
+
+
+def _is_accelerated(measurer: ViewMeasurer | None) -> bool:
+    return bool(getattr(measurer, "accelerated", False))
 
 
 def effective_measure_fps(settings, measurer: ViewMeasurer | None) -> float:
-    """GPU 测量可用时允许 10–30fps 密度；CPU 保持配置的 view_fps。"""
+    """只有真正加速的后端才允许 10–30fps；CPU/占位实现保持 view_fps。"""
     base = float(getattr(settings, "view_fps", 2.0))
-    if (
-        getattr(settings, "gpu_measure_enabled", False)
-        and getattr(measurer, "backend", "cpu") != "cpu"
+    if getattr(settings, "gpu_measure_enabled", False) and _is_accelerated(
+        measurer
     ):
         return max(base, min(30.0, float(getattr(settings, "gpu_measure_fps", 12.0))))
     return base

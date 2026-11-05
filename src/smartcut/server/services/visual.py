@@ -660,19 +660,29 @@ class VisualMixin:
         refs = [ref for ref in note.evidence_refs if ref in labels]
         return note.model_copy(update={"evidence_refs": refs})
 
+    @staticmethod
+    def _view_labels(view: dict) -> set[str]:
+        evidence = view.get("evidence") or {}
+        tiles = ((evidence.get("tile_map") or {}).get("tiles")) or []
+        return {
+            str(tile.get("label")) for tile in tiles if tile.get("label")
+        }
+
     def _allowed_evidence_labels(
         self,
         ctx: _VisionContext,
         views: list[dict] | tuple[dict, ...] | None = None,
     ) -> set[str]:
-        """所有视图标签的并集；各视图标签区间由服务层保证不相交。"""
+        """所有视图标签的并集；跨视图同名标签视为非法，避免引用歧义。"""
         labels: set[str] = set()
         for view in (ctx.evidence_views if views is None else views):
-            evidence = view.get("evidence") or {}
-            tiles = ((evidence.get("tile_map") or {}).get("tiles")) or []
-            labels.update(
-                str(tile.get("label")) for tile in tiles if tile.get("label")
-            )
+            view_labels = self._view_labels(view)
+            duplicate = labels & view_labels
+            if duplicate:
+                raise ValueError(
+                    f"证据标签跨视图重复: {sorted(duplicate)}"
+                )
+            labels |= view_labels
         return labels
 
     def _validate_evidence_refs(

@@ -95,8 +95,8 @@
 | 88 | VLM/Planner 的 `evidence_refs` 只能引用真实 Txx；未知标签必须拒绝，不得静默采信 | `contracts/vision.py`、`planner/client.py::_check_evidence_refs`、`services/visual.py`；`tests/test_evidence_citations.py` |
 | 89 | GL 渲染器只做拼版/编号/叠层，不得计算光流或访问源素材；每线程独立 context，失败必须回退 CPU 并记录 backend | `desktop/view/render_qtgl.py`、`services/evidence.py::_synthesize_evidence`；`tests/test_gl_renderer.py`、`tests/test_evidence_service.py` |
 | 90 | M2 视图（帧差/光流条带/bbox/ROI/codecview）只作候选证据；codecview 不承诺数值级 MV；ROI 必须回原素材取高分辨率；UI 叠层只读 | `perception/view/flow.py`、`views.py`、`services/evidence.py`、`desktop/widgets/evidence_panel.py`；`tests/test_evidence_views.py` |
-| 91 | 多视图证据的 Txx 必须在本次全部 TileMap 中全局唯一；白名单按并集校验，但跨视图同名标签不得视为合法 | `services/evidence.py::build_visual_evidence`、`services/visual.py::_allowed_evidence_labels`；`tests/test_view_routing.py` |
-| 92 | 视图路由由 `policies/vision.json` 的 routing 驱动；kind 必须属于 `ViewKind`，default 必须回退 `contact_sheet`，路由版本进入证据/视觉缓存键 | `perception/view/route.py`、`policy.py`、`scripts/check_drift.py`、`services/visual.py::_vision_notes_key`；`tests/test_view_routing.py`、`tests/test_policy_drift.py` |
+| 91 | 多视图证据的 Txx 必须在本次全部 TileMap 中全局唯一；白名单按并集校验，但跨视图同名标签不得视为合法 | `services/evidence.py::build_visual_evidence`、`services/visual.py::_allowed_evidence_labels`；`tests/test_view_routing.py`、`tests/test_evidence_citations.py` |
+| 92 | 视图路由由 `policies/vision.json` 的 routing 驱动；kind 必须属于 `ViewKind`，default 必须回退 `contact_sheet`，路由版本进入证据/视觉缓存键 | `perception/view/route.py`、`policy.py`、`scripts/check_drift.py`、`services/visual.py::_vision_notes_key`、`services/evidence.py::_evidence_key`；`tests/test_view_routing.py`、`tests/test_policy_drift.py` |
 | 93 | 同一次规划的多视图必须复用同一候选窗口与原始帧抽帧；仅 `roi_crop` 高分辨率与 `codec_residual` 允许单独抽帧 | `services/evidence.py::build_visual_evidence_set`、`_prepare_evidence`；`tests/test_view_routing.py` |
 | 94 | Measurement 只作为 prompt 事实（d_hist/flow/dir/face/score/risk）；缺失字段不得补造，首帧 d_hist 占位值不得注入 | `planner/vision.py::_evidence_tile_metadata`、`_evidence_timeline`；`tests/test_view_routing.py`、`tests/test_evidence_citations.py` |
 | 95 | 二次复核必须使用 flagged 章节 scoped 的新视图（不同 kind + ROI），不得重复发送主视图；ROI 由 measurements.score 选最异常时刻（按时间定位，避免 dedupe 索引错位） | `services/visual.py::_second_pass_notes`、`_deep_evidence_kinds`、`_most_anomalous_moment`、`services/evidence.py::build_visual_evidence_set`；`tests/test_view_routing.py` |
@@ -106,9 +106,13 @@
 | 99 | 相机运动与主体运动必须通过 RANSAC 仿射拆分；camera/subject/motion 只作测量事实，只在 flow 视图产生 | `perception/view/flow.py::_split_motion`、`measure.py`、`planner/vision.py`；`tests/test_evidence_views.py` |
 | 100 | 镜头聚类只在视觉簇边界处允许章节切分；聚类版本、阈值进入 chapters 缓存键 | `perception/cluster.py`、`perception/chapters.py`、`services/perception.py::build_chapters`；`tests/test_shot_clustering.py` |
 | 101 | dHash/直方图必须来自单一 `fingerprint.py`；版本与 engine 进入证据/质量/候选缓存键；cv2 缺失时保留 Pillow fallback | `perception/view/fingerprint.py`、`measure.py`、`hash.py`、`quality.py`、`frames.py`；`tests/test_fingerprint.py` |
-| 102 | `render_many` 只做拼版/编号/bbox，一次 context + 解码图片缓存；不得在 shader/渲染器内计算光流或直方图 | `perception/view/renderer.py`、`render_cpu.py`、`desktop/view/render_qtgl.py`、`synthesizer.py`；`tests/test_evidence_render_cpu.py`、`tests/test_gl_renderer.py` |
 | 103 | GpuMeasurer 与 renderer 解耦，只输出数值 MeasureResult；必须有 CPU 等价路径与容差比对，失败回退 CPU 并记录 `measure_backend`；`measure_backend` 不参与 render_hash | `perception/view/measure_gpu.py`、`services/evidence.py::_measure_view`、`contracts/visual_evidence.py`；`tests/test_gpu_measure.py` |
-| 104 | 项目打开期间 `open_project`/`proxy`/`audio_waveforms` 必须单飞去重；主素材波形复用 `build_audio_waveforms` 的 main peaks，不得并发重复 `build_waveform` | `desktop/controller.py::_open_inflight/_proxy_inflight/_waveform_inflight`、`desktop/main_window.py`、`desktop/widgets/timeline_widget.py`；`tests/test_gui_workflow.py`、`tests/test_desktop_gui.py` |
+| 104 | 项目打开期间 `open_project`/`proxy`/`audio_waveforms` 必须单飞去重；主素材波形复用 `build_audio_waveforms` 的 main peaks，不得并发重复 `build_waveform` | `desktop/controller.py::_open_inflight/_proxy_inflight/_waveform_inflight`、`desktop/main_window.py`、`desktop/widgets/timeline_widget.py`；`tests/test_desktop_smoke.py`、`tests/test_desktop_gui.py` |
+| 105 | 媒体修复/转换只产出新文件到 `exports/` 或 `repairs/`，源文件只读，不得写 IR/时间线；损坏文件经 `import_raw_media` 复制但不得注册素材 | `contracts/media_ops.py`、`server/services/media_tools.py`、`runner/tools/media_repair.py`；`tests/test_media_tools_service.py`、`tests/test_media_repair_tool.py` |
+| 106 | 修复缓存键必须含 source_hash + `media_repair_v1` + 规范化请求；remux 失败只能回退一次 reencode，失败不缓存 | `server/services/media_tools.py::repair_media`；`tests/test_media_tools_service.py` |
+| 107 | 媒体意图规则优先；LLM 只能输出无路径/命令的 `MediaGoalDraft`，失败回退规则；必须作用于用户当前选中的 `src` | `server/services/media_intent.py`、`server/services/media_tools.py::interpret_media_goal`、`contracts/media_ops.py`；`tests/test_media_intent.py`、`tests/test_media_ops_contracts.py`、`tests/test_media_tools_service.py` |
+| 108 | 音频-only 转码必须使用 `media_type="audio"` 且容器限 mp3/m4a/wav/flac；视频/音频容器不得混用 | `contracts/transcode.py`、`runner/tools/transcode.py`、`server/services/rendering.py::transcode`；`tests/test_media_ops_contracts.py`、`tests/test_transcode.py` |
+| 109 | 媒体工具长任务必须走 Job，GUI 只经 Controller；AI 计划执行前必须由用户确认 | `desktop/controller.py::diagnose_media/repair_media/interpret_media_goal`、`desktop/widgets/media_tools_panel.py`、`desktop/main_window.py`；`tests/test_media_tools_gui.py`、`tests/test_media_tools_panel.py` |
 
 ## 新增功能的检查清单
 

@@ -151,6 +151,53 @@ def test_job_submit_runs_off_ui_thread(tmp_path: Path, settings) -> None:
         db.dispose()
 
 
+def test_controller_single_flight_guards(settings) -> None:
+    """open_project/proxy/audio_waveforms 重复触发只允许一个在途任务。"""
+    from PySide6.QtWidgets import QApplication
+
+    from smartcut.desktop.controller import DesktopController
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    QApplication.instance() or QApplication([])
+    controller = DesktopController(settings, object(), object())  # type: ignore[arg-type]
+    ops: list[str] = []
+    controller._run = lambda op, fn: ops.append(op)  # type: ignore[assignment]
+    project_id = "p_singleflight"
+    controller._current_project = project_id
+    try:
+        controller.open_project(project_id)
+        controller.open_project(project_id)
+        assert ops == ["open_project"]
+        assert controller._open_inflight == project_id
+
+        # 失败回调必须清空单飞标记，允许用户重试。
+        controller._on_task_failed("open_project", "boom")
+        assert controller._open_inflight is None
+        controller.open_project(project_id)
+        assert ops.count("open_project") == 2
+        controller._open_inflight = None
+
+        controller.load_audio_waveforms()
+        controller.load_audio_waveforms()
+        assert ops.count("audio_waveforms") == 1
+        controller._dispatch(
+            "audio_waveforms", {"project_id": project_id, "data": {}}
+        )
+        controller.load_audio_waveforms()
+        assert ops.count("audio_waveforms") == 2
+
+        controller.build_proxy(project_id)
+        controller.build_proxy(project_id)
+        assert ops.count("proxy") == 1
+        controller._dispatch(
+            "proxy", {"project_id": project_id, "proxy": None}
+        )
+        controller.build_proxy(project_id)
+        assert ops.count("proxy") == 2
+    finally:
+        controller.shutdown()
+
+
 def test_desktop_app_smoke_offscreen(tmp_path: Path) -> None:
     """在 offscreen 平台构造完整主窗口，验证 GUI 装配不会崩溃。"""
     env = os.environ.copy()
